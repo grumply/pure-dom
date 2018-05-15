@@ -64,25 +64,25 @@ import Pure.Data.Queue (Queue,newQueue,arrive,collect)
 import Pure.Data.Txt (Txt)
 import qualified Pure.Data.Txt as Txt (append,intercalate)
 
-inject :: (IsNode host, Typeable v, Pure v) => v -> host -> IO ()
+inject :: (IsNode host) => View -> host -> IO ()
 inject v host = animator `seq` do
   mtd <- newIORef (return ())
-  build mtd (Just $ toNode host) (View v)
+  build mtd (Just $ toNode host) v
   join $ readIORef mtd
 
-head :: (Pure v, Typeable v) => v -> IO ()
+head :: View -> IO ()
 head v = animator `seq` do
   h <- getHead
   mtd <- newIORef (return ())
-  built <- build mtd Nothing (View v)
+  built <- build mtd Nothing v
   for_ (getHost built) (replaceNode (toNode h))
   join (readIORef mtd)
 
-body :: (Pure v, Typeable v) => v -> IO ()
-body v = do
+body :: View -> IO ()
+body v = animator `seq` do
   b <- getBody
   mtd <- newIORef (return ())
-  built <- build mtd Nothing (View v)
+  built <- build mtd Nothing v
   for_ (getHost built) (replaceNode (toNode b))
   join (readIORef mtd)
 
