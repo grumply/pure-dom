@@ -154,7 +154,7 @@ build mounted mparent (TextView _ t) = do
   return $ TextView (Just tn) t
 
 build mounted mparent HTMLView {..} = do
-  let Features {..} = features
+  let Features_ {..} = features
   e <- create tag
   setClasses e classes
   setStyles e styles
@@ -172,7 +172,7 @@ build mounted mparent HTMLView {..} = do
   return $ HTMLView (Just e) tag features { listeners = ls } cs
 
 build mounted mparent KHTMLView {..} = do
-  let Features {..} = features
+  let Features_ {..} = features
   e <- create tag
   setClasses e classes
   setStyles e styles
@@ -190,7 +190,7 @@ build mounted mparent KHTMLView {..} = do
   return $ KHTMLView (Just e) tag features { listeners = ls } cs (IntMap.fromList cs)
 
 build mounted mparent RawView {..} = do
-  let Features {..} = features
+  let Features_ {..} = features
   e <- create tag
   setClasses e classes
   setStyles e styles
@@ -206,7 +206,7 @@ build mounted mparent RawView {..} = do
   return $ RawView (Just e) tag features { listeners = ls } content
 
 build mounted mparent SVGView {..} = do
-  let Features {..} = features
+  let Features_ {..} = features
   e <- createNS "http://www.w3.org/2000/svg" tag
   setClasses e classes
   setStyles e styles
@@ -225,7 +225,7 @@ build mounted mparent SVGView {..} = do
   return $ SVGView (Just e) tag features { listeners = ls } xlinks cs
 
 build mounted mparent KSVGView {..} = do
-  let Features {..} = features
+  let Features_ {..} = features
   e <- createNS "http://www.w3.org/2000/svg" tag
   setClasses e classes
   setStyles e styles
