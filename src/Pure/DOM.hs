@@ -177,7 +177,7 @@ build mounted mparent KHTMLView {..} = do
   e <- create tag
   ls <- setFeatures mounted e features
   let n = Just (toNode e)
-  cs <- for keyedChildren (traverse (build mounted n)
+  cs <- for keyedChildren (traverse (build mounted n))
   for_ mparent (`append` e)
   return $ KHTMLView (Just e) tag features { listeners = ls } cs (IntMap.fromList cs)
 build mounted mparent RawView {..} = do
