@@ -147,11 +147,12 @@ runPlan :: [IO ()] -> IO ()
 runPlan = foldr (flip (>>)) (return ())
 
 -- | Given a host node and a View, build and embed the View.
+{-# NOINLINE inject #-}
 inject :: Element -> View -> IO ()
 inject host v = do
   mtd <- newIORef []
   build True mtd (Just $ toNode host) v
-  foldr (flip (>>)) (return ()) =<< readIORef mtd
+  runPlan =<< readIORef mtd
   where
     build :: Bool -> IORef [IO ()] -> Maybe Node -> View -> IO View
     build first mtd = go
@@ -182,7 +183,7 @@ inject host v = do
           e <- create tag
           ls <- setFeatures e features
           let n = Just (toNode e)
-          -- unless first yield
+          unless first yield
           !cs <- for children (go n)
           for_ mparent (`append` e)
           return $ HTMLView (Just e) tag features { listeners = ls } cs
@@ -197,7 +198,7 @@ inject host v = do
           ls <- setFeatures e features
           setXLinks e xlinks
           let n = Just (toNode e)
-          -- unless first yield
+          unless first yield
           !cs <- for children (go n)
           for_ mparent (`append` e)
           return $ SVGView (Just e) tag features { listeners = ls } xlinks cs
@@ -205,7 +206,7 @@ inject host v = do
           e <- create tag
           ls <- setFeatures e features
           let n = Just (toNode e)
-          -- unless first yield
+          unless first yield
           !cs <- for keyedChildren (traverse (go n))
           for_ mparent (`append` e)
           return $ KHTMLView (Just e) tag features { listeners = ls } cs
@@ -214,7 +215,7 @@ inject host v = do
           ls <- setFeatures e features
           setXLinks e xlinks
           let n = Just (toNode e)
-          -- unless first yield
+          unless first yield
           !cs <- for keyedChildren (traverse (go n))
           for_ mparent (`append` e)
           return $ KSVGView (Just e) tag features { listeners = ls } xlinks cs
@@ -382,113 +383,7 @@ inject host v = do
                             performIO writeRef
                             worker (newProps,newState',acc,cps)
 
-              -- for_ mcs $ outer view0 live0 props0 state0 []
           where
-          --   {-# INLINE await #-}
-          --   await = performIO $ do
-          --     mq <- readIORef crPatchQueue
-          --     for mq collect
-
-          --   {-# INLINE outer #-}
-          --   outer old live props state = inner props state
-          --     where
-          --       {-# INLINE inner #-}
-          --       inner newProps newState = worker
-          --         where
-          --           {-# INLINE worker #-}
-          --           worker :: [(m (),View -> m (),m ())] -> [ComponentPatch m props state] -> m ()
-          --           worker [] [] = await >>= traverse_ (worker [])
-          --           worker acc [] = do
-          --             dus <- for (List.reverse acc) $ \(willUpd,didUpd,callback) -> do
-          --               willUpd
-          --               return (didUpd,callback)
-          --             (new,new_live) <- performIO $ do
-          --               let new = render newProps newState
-          --               case reallyUnsafePtrEquality# old new of
-          --                 1# -> print "Same view"
-          --                 _  -> print "Different view"
-          --               mtd <- newIORef []
-          --               barrier <- newEmptyMVar
-          --               let (plan,new_live) = buildPlan (putMVar barrier ()) (\p p' -> diffDeferred mtd p p' live old new)
-          --               plan `seq` new_live `seq` writeIORef crView new_live
-          --               mtd <- readIORef mtd
-          --               case plan of
-          --                 -- Just the putMVar
-          --                 [_] -> do
-          --                   runPlan mtd
-          --                   return (new,new_live)
-          --                 _   -> do
-          --                   addAnimation (runPlan plan)
-          --                   takeMVar barrier
-          --                   runPlan mtd
-          --                   return (new,new_live)
-          --             cbs <- for dus $ \(du,c) -> do
-          --               du new_live
-          --               return c
-          --             sequence_ cbs
-          --             mcs <- await
-          --             for_ mcs $ outer new new_live newProps newState []
-
-          --           worker acc (cp : cps) = do
-          --             case cp of
-          --               Unmount mv mtd -> do
-          --                 unmount
-          --                 performIO $ do
-          --                   writeIORef crPatchQueue Nothing
-          --                   barrier <- newEmptyMVar
-          --                   live <- readIORef crView
-          --                   let (p,_) = buildPlan (putMVar barrier ()) (\p p' ->
-          --                                   let removeDeferred plan plan' live = do
-          --                                         for_ (getHost live) $ \host -> amendPlan p $ removeNodeMaybe host
-          --                                         amendPlan p' (cleanup live)
-          --                                       replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) =
-          --                                         case oldHost of
-          --                                           Nothing -> error "Expected old host in replaceDeferred; got nothing."
-          --                                           Just oh ->
-          --                                             case newHost of
-          --                                               Nothing -> error "Expected new host in replaceDeferred; got nothing."
-          --                                               Just nh -> do
-          --                                                 amendPlan plan (replaceNode oh nh)
-          --                                                 amendPlan plan' (cleanup old)
-          --                                                 return new
-          --                                   in maybe (removeDeferred p p' live) (void . replaceDeferred p p' live) mv
-          --                                 )
-          --                   addAnimation (runPlan p)
-          --                   takeMVar barrier
-          --                   mtd
-          --                 unmounted
-          --                 performIO $ do
-          --                   killThread =<< myThreadId
-          --               UpdateProperties newProps' -> do
-          --                 newState'    <- receive newProps' newState
-          --                 shouldUpdate <- force   newProps' newState'
-          --                 let writeRefs = writeIORef crProps newProps' >> writeIORef crState newState'
-          --                 if shouldUpdate || not (List.null acc) then
-          --                   let
-          --                     will = update  newProps' newState'
-          --                     did  = updated newProps  newState
-          --                   in
-          --                     inner newProps' newState' ((will >> performIO writeRefs,did,performIO (return ())) : acc) cps
-          --                 else do
-          --                   performIO writeRefs
-          --                   inner newProps' newState' acc cps
-          --               UpdateState f -> do
-          --                 (newState',updatedCallback) <- f newProps newState
-          --                 case reallyUnsafePtrEquality# newState newState' of
-          --                   1# -> performIO $ print "Same new state"
-          --                   _  -> performIO $ print "Different new state"
-          --                 shouldUpdate                <- force newProps newState'
-          --                 let writeRef = writeIORef crState newState'
-          --                 if shouldUpdate || not (List.null acc) then
-          --                   let
-          --                     will = update  newProps newState'
-          --                     did  = updated newProps newState
-          --                   in
-          --                     inner newProps newState' ((will >> performIO writeRef,did,updatedCallback) : acc) cps
-          --                 else do
-          --                   performIO writeRef
-          --                   inner newProps newState' acc cps
-
             cleanupListener :: Listener -> IO ()
             cleanupListener (On _ _ _ _ stp) = stp
 
