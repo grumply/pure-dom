@@ -472,16 +472,17 @@ inject host v = do
                         | otherwise          -> replace
 
                       (PortalView{},PortalView{})
-                        | same (toJSV (portalDestination old)) (toJSV (portalDestination new)) ->
-                          diffElementDeferred mounted plan plan' (portalView old) (portalView mid) (portalView new)
+                        | same (toJSV (portalDestination old)) (toJSV (portalDestination new)) -> do
+                          v <- diffElementDeferred mounted plan plan' (portalView old) (portalView mid) (portalView new)
+                          return old { portalView = v }
                         | otherwise -> do
-                              built@(getHost -> Just h) <- unsafeIOToST (build False mounted Nothing (portalView new))
-                              amendPlan plan' (cleanup old)
-                              amendPlan plan $ do
-                                for_ (getHost (portalView old)) removeNode
-                                append (toNode $ portalDestination new) h
-                              -- recycling the portalProxy
-                              return (PortalView (portalProxy old) (portalDestination new) built)
+                          built@(getHost -> Just h) <- unsafeIOToST (build False mounted Nothing (portalView new))
+                          amendPlan plan' (cleanup old)
+                          amendPlan plan $ do
+                            for_ (getHost (portalView old)) removeNode
+                            append (toNode $ portalDestination new) h
+                          -- recycling the portalProxy
+                          return (PortalView (portalProxy old) (portalDestination new) built)
 
                       (_,PortalView{}) -> do
                         proxy <- unsafeIOToST (build False mounted Nothing (NullView Nothing))
