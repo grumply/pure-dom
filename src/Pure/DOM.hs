@@ -224,8 +224,10 @@ inject host v = do
           for_ mparent (`append` e)
           return $ NullView (Just e)
         go mparent PortalView{..} = do
+          e <- create "template"
+          for_ mparent (`append` e)
           v <- go (Just $ toNode portalDestination) portalView
-          return $ PortalView portalDestination v
+          return $ PortalView (Just e) portalDestination v
 
         setXLinks :: Element -> Map Txt Txt -> IO ()
         setXLinks e = traverse_ (uncurry (setAttributeNS e "http://www.w3.org/1999/xlink")) . Map.toList
@@ -419,12 +421,35 @@ inject host v = do
                       replace = unsafeIOToST (build False mounted Nothing new) >>= replaceDeferred plan plan' old
                   in
                     case (mid,new) of
-                      (NullView{},NullView{}) -> return old
+                      (ComponentView t p _ v,ComponentView t' p' _ v') -> unsafeIOToST $
+                        case reallyUnsafePtrEquality# p (unsafeCoerce p') of
+                          1# -> return old
+                          _  ->
+                                  case old of
+                                    ComponentView _ _ ~(Just r0) _ ->
+                                      case reallyUnsafePtrEquality# t t' of
+                                        0# | t /= t' -> do
+                                          mtd <- newIORef []
+                                          new' <- build False mtd Nothing new
+                                          queueComponentUpdate r0 (Unmount (Just new') (readIORef mtd >>= runPlan))
+                                          return new'
+                                        _ -> do
+                                          let r = unsafeCoerce r0
+                                          setProps r p'
+                                          return (ComponentView t' p' (Just r) v')
+
+                      (HTMLView{},HTMLView{}) ->
+                        case reallyUnsafePtrEquality# (tag mid) (tag new) of
+                          1# -> diffElementDeferred mounted plan plan' old mid new
+                          _ | tag mid == tag new -> diffElementDeferred mounted plan plan' old mid new
+                            | otherwise          -> replace
 
                       (TextView _ t,TextView _ t') ->
                         case reallyUnsafePtrEquality# t t' of
                           0# | t /= t' -> replaceTextContentDeferred plan old new
                           _ -> return old
+
+                      (NullView{},NullView{}) -> return old
 
                       (SomeView t m,SomeView t' n) ->
                         case reallyUnsafePtrEquality# m (unsafeCoerce n) of
@@ -433,12 +458,6 @@ inject host v = do
                             case reallyUnsafePtrEquality# t t' of
                               0# | t /= t' -> replace
                               _            -> diffDeferred mounted plan plan' old (view m) (view n)
-
-                      (HTMLView{},HTMLView{}) ->
-                        case reallyUnsafePtrEquality# (tag mid) (tag new) of
-                          1# -> diffElementDeferred mounted plan plan' old mid new
-                          _ | tag mid == tag new -> diffElementDeferred mounted plan plan' old mid new
-                            | otherwise          -> replace
 
                       (SVGView{},SVGView{})
                         | tag mid == tag new -> diffElementDeferred mounted plan plan' old mid new
@@ -459,26 +478,22 @@ inject host v = do
                               built@(getHost -> Just h) <- unsafeIOToST (build False mounted Nothing (portalView new))
                               amendPlan plan' (cleanup old)
                               amendPlan plan $ do
-                                remove old
-                                append h (toNode $ portalDestination new)
-                              return (PortalView (portalDestination new) built)
+                                for_ (getHost (portalView old)) removeNode
+                                append (toNode $ portalDestination new) h
+                              -- recycling the portalProxy
+                              return (PortalView (portalProxy old) (portalDestination new) built)
 
-                      (ComponentView t p _ v,ComponentView t' p' _ v') -> unsafeIOToST $
-                        case reallyUnsafePtrEquality# p (unsafeCoerce p') of
-                          1# -> return old
-                          _  ->
-                                  case old of
-                                    ComponentView _ _ ~(Just r0) _ ->
-                                      case reallyUnsafePtrEquality# t t' of
-                                        0# | t /= t' -> do
-                                          mtd <- newIORef []
-                                          new' <- build False mtd Nothing new
-                                          queueComponentUpdate r0 (Unmount (Just new') (readIORef mtd >>= runPlan))
-                                          return new'
-                                        _ -> do
-                                          let r = unsafeCoerce r0
-                                          setProps r p'
-                                          return (ComponentView t' p' (Just r) v')
+                      (_,PortalView{}) -> do
+                        proxy <- unsafeIOToST (build False mounted Nothing (NullView Nothing))
+                        replaceDeferred plan plan' old proxy
+                        built@(getHost -> Just h) <- unsafeIOToST (build False mounted Nothing (portalView new))
+                        amendPlan plan $ append (toNode $ portalDestination new) h
+                        return (PortalView (fmap coerce $ getHost proxy) (portalDestination new) built)
+
+                      (PortalView{},_) -> do
+                        amendPlan plan (cleanup old)
+                        amendPlan plan $ for_ (getHost (portalView old)) removeNode
+                        replace
 
                       _ -> replace
 
@@ -749,11 +764,6 @@ inject host v = do
                 replaceTextContentDeferred plan old@(textHost -> Just oh) new = do
                   amendPlan plan (oh `replaceText` content new)
                   return old { content = content new }
-
-                remove :: View -> IO ()
-                remove v = do
-                  for_ (getHost v) removeNode
-                  cleanup v
 
                 diffSVGKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
                 diffSVGKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
