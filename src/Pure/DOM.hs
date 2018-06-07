@@ -895,7 +895,7 @@ inject host v = do
                       if mk == nk
                         then do
                           n' <- dKCD_helper dc mounted plan plan' o m n
-                          ns' <- go (i + 1) os ms []
+                          ns' <- start (i + 1) os ms []
                           return (n':ns')
                         else do
                           modifySTRef' dc $ \(e,removals) ->
@@ -903,13 +903,13 @@ inject host v = do
                             in (e,removals')
                           start i os ms ns
 
-                    go i ~os0@(o0@(ok0,old0):os1@(o1@(ok1,old1):os2)) ~ms0@(m0@(mk0,mid0):ms1@(m1@(mk1,mid1):ms2)) ~ns@(n0@(nk0,new0):ns1@(n1@(nk1,new1):ns2))
+                    go i os0@(o0@(ok0,old0):os1@(o1@(ok1,old1):os2)) ~ms0@(m0@(mk0,mid0):ms1@(m1@(mk1,mid1):ms2)) ~ns@(n0@(nk0,new0):ns1@(n1@(nk1,new1):ns2))
                       | mk0 == nk0 = do
                           n <- dKCD_helper dc mounted plan plan' o0 m0 n0
                           case reallyUnsafePtrEquality# ms1 ns1 of
                             1# -> return (n:os1)
                             _  -> do
-                              ns <- start (i + 1) os1 ms1 ns1
+                              ns <- go (i + 1) os1 ms1 ns1
                               return (n:ns)
 
                       | mk0 == nk1 && mk1 == nk0 = do
@@ -929,7 +929,7 @@ inject host v = do
                           case reallyUnsafePtrEquality# ms0 ns1 of
                             1# -> return (n0:os0)
                             _  -> do
-                              ns <- start (i + 1) os0 ms0 ns1
+                              ns <- go (i + 1) os0 ms0 ns1
                               return (n0:ns)
 
                       | mk1 == nk0 = do
@@ -939,14 +939,14 @@ inject host v = do
                             in (e,removals')
                           case reallyUnsafePtrEquality# ms1 ns of
                             1# -> return os1
-                            _  -> start i os1 ms1 ns
+                            _  -> go i os1 ms1 ns
 
                       | not (IntSet.member mk0 keys) = do
                           n <- dKCD_helper dc mounted plan plan' o0 m0 n0
                           case reallyUnsafePtrEquality# ms1 ns1 of
                             1# -> return (n:os1)
                             _  -> do
-                              ns <- start (i + 1) os1 ms1 ns1
+                              ns <- go (i + 1) os1 ms1 ns1
                               return (n:ns)
 
                       | otherwise = do
@@ -967,7 +967,7 @@ inject host v = do
                               case reallyUnsafePtrEquality# ms1 ns1 of
                                 1# -> return (n0:os1)
                                 _  -> do
-                                  ns <- start (i + 1) os1 ms1 ns1
+                                  ns <- go (i + 1) os1 ms1 ns1
                                   return (n0:ns)
 
 
