@@ -292,7 +292,8 @@ inject host v = do
         newComponentThread :: forall m props state. Ref m props state -> View -> View -> props -> state -> IO ()
         newComponentThread ref@Ref { crComponent = Comp {..}, ..} view0 live0 props0 state0 = do
             Just pq <- readIORef crPatchQueue
-            void $ forkIO $ execute $
+            void $ forkIO $ execute $ do
+              executing
               flip fix (view0,live0,props0,state0) $ \start (old,live,props,state) -> do
                 flip fix (props,state,[],[]) $ \worker (newProps,newState,acc,cps) ->
                   case (acc,cps) of
