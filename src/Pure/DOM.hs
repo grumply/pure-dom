@@ -11,7 +11,7 @@ import Data.Coerce (coerce)
 import Data.Foldable (for_,traverse_)
 import Data.Function (fix)
 import Data.IORef (IORef,newIORef,atomicModifyIORef',modifyIORef',readIORef,writeIORef)
-import Data.List as List (null,reverse,filter,length,lookup) -- REMOVE LENGTH
+import Data.List as List (null,reverse,filter,lookup)
 import Data.Maybe (fromJust,isNothing)
 import Data.STRef (STRef,newSTRef,readSTRef,modifySTRef,modifySTRef,modifySTRef',writeSTRef)
 import Data.Traversable (for,traverse)
@@ -33,8 +33,8 @@ import qualified Data.IntSet as IntSet (fromList,member)
 import Pure.Data.View (Pure(..),View(..),Features(..),Listener(..),Lifecycle(..),Comp(..),Target(..),getHost,setProps,queueComponentUpdate,Ref(..),ComponentPatch(..))
 
 -- from pure-lifted
-import Pure.Animation (addAnimation)
-import Pure.IdleWork (addIdleWork)
+import Pure.Animation
+import Pure.IdleWork
 import Pure.Data.Lifted
   (
    Element(..)
@@ -125,22 +125,18 @@ newPlan :: ST s (Plan s)
 newPlan = newSTRef []
 
 {-# INLINE buildPlan #-}
-buildPlan :: IO () -> (forall s. Plan s -> Plan s -> ST s a) -> ([IO ()],a)
-buildPlan bc f = runST $ do
+buildPlan :: (forall s. Plan s -> Plan s -> ST s a) -> ([IO ()],[IO ()],a)
+buildPlan f = runST $ do
   p  <- newPlan
   p' <- newPlan
   a  <- f p p'
   p  <- readSTRef p
   p' <- readSTRef p'
-  let plan =
-        case p' of
-          [] -> bc : p
-          _  -> void (addIdleWork (runPlan p')) : bc : p
-  return (plan,a)
+  p `seq` p' `seq` a `seq` return (p,p',a)
 
 {-# INLINE amendPlan #-}
 amendPlan :: Plan s -> IO () -> ST s ()
-amendPlan plan f = modifySTRef' plan (f:)
+amendPlan plan !f = modifySTRef' plan (f:)
 
 {-# INLINE runPlan #-}
 runPlan :: [IO ()] -> IO ()
@@ -312,20 +308,24 @@ inject host v = do
                                         1# -> render newProps state
                                         _  -> render newProps newState
                         mtd <- newIORef []
-                        barrier <- newEmptyMVar
-                        let (plan,new_live) = buildPlan (putMVar barrier ()) (\p p' -> diffDeferred mtd p p' live old new)
-                        plan `seq` new_live `seq` writeIORef crView new_live
-                        mtd <- readIORef mtd
-                        case plan of
-                          -- Just the putMVar
-                          [_] -> do
-                            runPlan mtd
-                            return (new,new_live)
-                          _   -> do
-                            addAnimation (runPlan plan)
+                        let (plan,plan',new_live) = buildPlan (\p p' -> diffDeferred mtd p p' live old new)
+                        mtd <- plan `seq` plan' `seq` readIORef mtd
+                        let hasAnimations = not $ List.null plan
+                            hasIdleWork = not $ List.null plan'
+                        if hasAnimations && hasIdleWork
+                          then do
+                            barrier <- newEmptyMVar
+                            addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : (writeIORef crView new_live) : plan )
                             takeMVar barrier
-                            runPlan mtd
-                            return (new,new_live)
+                          else do
+                            when hasAnimations $ do
+                              barrier <- newEmptyMVar
+                              addAnimationsReverse ( (putMVar barrier ()) : (writeIORef crView new_live) : plan )
+                              takeMVar barrier
+                            when hasIdleWork $ do
+                              void (addIdleWorksReverse plan')
+                        runPlan mtd
+                        return (new,new_live)
                       cbs <- for dus $ \(du,c) -> do
                         du new_live
                         return c
@@ -337,26 +337,37 @@ inject host v = do
                           unmount
                           performIO $ do
                             writeIORef crPatchQueue Nothing
-                            barrier <- newEmptyMVar
                             live <- readIORef crView
-                            let (p,_) = buildPlan (putMVar barrier ()) (\p p' ->
-                                            let removeDeferred plan plan' live = do
-                                                  for_ (getHost live) $ \host -> amendPlan p $ removeNodeMaybe host
-                                                  amendPlan p' (cleanup live)
-                                                replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) =
-                                                  case oldHost of
-                                                    Nothing -> error "Expected old host in replaceDeferred; got nothing."
-                                                    Just oh ->
-                                                      case newHost of
-                                                        Nothing -> error "Expected new host in replaceDeferred; got nothing."
-                                                        Just nh -> do
-                                                          amendPlan plan (replaceNode oh nh)
-                                                          amendPlan plan' (cleanup old)
-                                                          return new
-                                            in maybe (removeDeferred p p' live) (void . replaceDeferred p p' live) mv
-                                          )
-                            addAnimation (runPlan p)
-                            takeMVar barrier
+                            let (plan,plan',res) = buildPlan $ \plan plan' ->
+                                    let removeDeferred = do
+                                          amendPlan plan' (cleanup live)
+                                            -- for_ (getHost live) $ \host -> amendPlan plan' $ removeNodeMaybe host
+                                        replaceDeferred old@(getHost -> oldHost) new@(getHost -> newHost) =
+                                          case oldHost of
+                                            Nothing -> error "Expected old host in replaceDeferred; got nothing."
+                                            Just oh ->
+                                              case newHost of
+                                                Nothing -> error "Expected new host in replaceDeferred; got nothing."
+                                                Just nh -> do
+                                                  amendPlan plan  (replaceNode oh nh)
+                                                  amendPlan plan' (cleanup old)
+                                    in maybe removeDeferred (replaceDeferred live) mv
+                            plan `seq` plan' `seq`
+                              let hasAnimations = not $ List.null plan
+                                  hasIdleWork   = not $ List.null plan'
+                              in
+                                if hasAnimations && hasIdleWork
+                                  then do
+                                    barrier <- newEmptyMVar
+                                    addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : plan )
+                                    takeMVar barrier
+                                  else do
+                                    when hasAnimations $ do
+                                      barrier <- newEmptyMVar
+                                      addAnimationsReverse ( (putMVar barrier ()) : plan )
+                                      takeMVar barrier
+                                    when hasIdleWork $ do
+                                      void $ addIdleWorksReverse plan'
                             mtd
                           unmounted
                         UpdateProperties newProps' -> do
@@ -714,10 +725,11 @@ inject host v = do
                     cleanupCheck olds mids news = do
                       case reallyUnsafePtrEquality# mids news of
                         1# -> return olds
-                        _  -> if Prelude.null news
+                        _  -> if List.null news
                                 then do
                                   amendPlan plan (clearNode e)
-                                  amendPlan plan' (for_ olds cleanup)
+                                  let cs = fmap cleanup olds
+                                  for_ cs $ \c -> c `seq` amendPlan plan' c
                                   return []
                                 else go olds mids news
 
@@ -803,7 +815,8 @@ inject host v = do
                           return news'
                         (_,[])  -> do
                           amendPlan plan (clearNode e)
-                          amendPlan plan' (for_ olds (traverse_ cleanup))
+                          let cs = fmap (traverse_ cleanup) olds
+                          for_ cs (\c -> c `seq` amendPlan plan' c)
                           return []
                         _       -> do
                           dc             <- newSTRef (e,mempty)
