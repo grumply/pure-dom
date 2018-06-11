@@ -144,7 +144,7 @@ runPlan = foldr (flip (>>)) (return ())
 
 -- | Given a host node and a View, build and embed the View.
 {-# NOINLINE inject #-}
-inject :: Element -> View -> IO ()
+inject :: IsNode e => e -> View -> IO ()
 inject host v = do
   mtd <- newIORef []
   build True mtd (Just $ toNode host) v
