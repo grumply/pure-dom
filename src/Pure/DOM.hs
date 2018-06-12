@@ -136,11 +136,19 @@ buildPlan f = runST $ do
 
 {-# INLINE amendPlan #-}
 amendPlan :: Plan s -> IO () -> ST s ()
-amendPlan plan !f = modifySTRef' plan (f:)
+amendPlan plan f = modifySTRef' plan (f:)
 
 {-# INLINE runPlan #-}
 runPlan :: [IO ()] -> IO ()
 runPlan = foldr (flip (>>)) (return ())
+
+yield_ :: IO ()
+yield_ =
+#ifndef RENDER_SYNC
+  yield
+#else
+  return ()
+#endif
 
 -- | Given a host node and a View, build and embed the View.
 {-# NOINLINE inject #-}
@@ -179,8 +187,8 @@ inject host v = do
           e <- create tag
           ls <- setFeatures e features
           let n = Just (toNode e)
-          unless first yield
-          !cs <- for children (go n)
+          unless first yield_
+          cs <- for children (go n)
           for_ mparent (`append` e)
           return $ HTMLView (Just e) tag features { listeners = ls } cs
         go mparent RawView {..} = do
@@ -194,16 +202,16 @@ inject host v = do
           ls <- setFeatures e features
           setXLinks e xlinks
           let n = Just (toNode e)
-          unless first yield
-          !cs <- for children (go n)
+          unless first yield_
+          cs <- for children (go n)
           for_ mparent (`append` e)
           return $ SVGView (Just e) tag features { listeners = ls } xlinks cs
         go mparent KHTMLView {..} = do
           e <- create tag
           ls <- setFeatures e features
           let n = Just (toNode e)
-          unless first yield
-          !cs <- for keyedChildren (traverse (go n))
+          unless first yield_
+          cs <- for keyedChildren (traverse (go n))
           for_ mparent (`append` e)
           return $ KHTMLView (Just e) tag features { listeners = ls } cs
         go mparent KSVGView {..} = do
@@ -211,8 +219,8 @@ inject host v = do
           ls <- setFeatures e features
           setXLinks e xlinks
           let n = Just (toNode e)
-          unless first yield
-          !cs <- for keyedChildren (traverse (go n))
+          unless first yield_
+          cs <- for keyedChildren (traverse (go n))
           for_ mparent (`append` e)
           return $ KSVGView (Just e) tag features { listeners = ls } xlinks cs
         go mparent NullView{} = do
@@ -285,6 +293,7 @@ inject host v = do
               modifyIORef' mtd ((w (toNode e)):)
               return (HostRef w)
 
+        {-# NOINLINE newComponentThread #-}
         newComponentThread :: forall m props state. Ref m props state -> View -> View -> props -> state -> IO ()
         newComponentThread ref@Ref { crComponent = Comp {..}, ..} view0 live0 props0 state0 = do
             Just pq <- readIORef crPatchQueue
@@ -513,9 +522,9 @@ inject host v = do
               where
                 diffElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
                 diffElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
-                  !fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
-                  unsafeIOToST yield
-                  !cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
+                  fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
+                  unsafeIOToST yield_
+                  cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
                   return old
                     { features = fs
                     , children = cs
@@ -523,10 +532,10 @@ inject host v = do
 
                 diffSVGElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
                 diffSVGElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
-                  !fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
+                  fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
                   diffXLinksDeferred e plan (xlinks mid) (xlinks new)
-                  unsafeIOToST yield
-                  !cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
+                  unsafeIOToST yield_
+                  cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
                   return old
                     { features = fs
                     , children = cs
@@ -783,10 +792,10 @@ inject host v = do
 
                 diffSVGKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
                 diffSVGKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
-                  !fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
+                  fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
                   diffXLinksDeferred e plan (xlinks mid) (xlinks new)
-                  unsafeIOToST yield
-                  !cs <- diffKeyedChildrenDeferred e mounted plan plan' (IntSet.fromList $ fmap fst (keyedChildren new)) (keyedChildren old) (keyedChildren mid) (keyedChildren new)
+                  unsafeIOToST yield_
+                  cs <- diffKeyedChildrenDeferred e mounted plan plan' (IntSet.fromList $ fmap fst (keyedChildren new)) (keyedChildren old) (keyedChildren mid) (keyedChildren new)
                   return old
                     { features = fs
                     , keyedChildren = cs
@@ -794,9 +803,9 @@ inject host v = do
 
                 diffKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
                 diffKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
-                  !fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
-                  unsafeIOToST yield
-                  !cs <- diffKeyedChildrenDeferred e mounted plan plan' (IntSet.fromList $ fmap fst (keyedChildren new)) (keyedChildren old) (keyedChildren mid) (keyedChildren new)
+                  fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
+                  unsafeIOToST yield_
+                  cs <- diffKeyedChildrenDeferred e mounted plan plan' (IntSet.fromList $ fmap fst (keyedChildren new)) (keyedChildren old) (keyedChildren mid) (keyedChildren new)
                   return old
                     { features = fs
                     , keyedChildren = cs
