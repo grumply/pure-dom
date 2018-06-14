@@ -301,7 +301,7 @@ buildComponent mtd mparent (ComponentView name props _ comp) = do
               dus <- for (List.reverse acc) $ \(willUpd,didUpd,callback) -> do
                 willUpd
                 return (didUpd,callback)
-              new_live <- performIO $ do
+              performIO $ do
                 (old,live,props,state,newProps,newState) <- readIORef st
                 let new =
                       case reallyUnsafePtrEquality# props newProps of
@@ -333,16 +333,15 @@ buildComponent mtd mparent (ComponentView name props _ comp) = do
                     when hasIdleWork $ do
                       void (addIdleWorksReverse plan')
                 runPlan mtd
-                return new_live
               cbs <- for dus $ \(du,c) -> do
-                du new_live
+                du
                 return c
               foldr (>>) (return ()) cbs
               worker ([],[])
             (acc,cp:cps) ->
               case cp of
                 Unmount mv mtd -> do
-                  unmount
+                  unmounted
                   performIO $ do
                     (old,live,_,_,_,_) <- readIORef st
                     writeIORef crPatchQueue Nothing
@@ -376,8 +375,11 @@ buildComponent mtd mparent (ComponentView name props _ comp) = do
                               takeMVar barrier
                             when hasIdleWork $ do
                               void $ addIdleWorksReverse plan'
+                    writeIORef st      undefined
+                    writeIORef crProps (error "ask: Component invalidated.")
+                    writeIORef crState (error "get: Component invalidated.")
+                    writeIORef crView  (error "look: Component invalidated.")
                     mtd
-                  unmounted
                 UpdateProperties newProps' -> do
                   (old,live,props,state,newProps,newState) <- performIO $ readIORef st
                   newState'    <- receive newProps' newState
