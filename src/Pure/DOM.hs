@@ -139,9 +139,9 @@ runPlan = foldr (flip (>>)) (return ())
 yield_ :: IO ()
 yield_ =
 #ifndef RENDER_SYNC
-  return ()
-#else
   yield
+#else
+  return ()
 #endif
 
 -- | Given a host node and a View, build and embed the View.
