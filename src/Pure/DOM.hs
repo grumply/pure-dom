@@ -1,31 +1,33 @@
-{-# LANGUAGE CPP, OverloadedStrings, RankNTypes, ScopedTypeVariables, PatternSynonyms, ViewPatterns, MagicHash, RecordWildCards, BangPatterns #-}
+{-# LANGUAGE CPP, OverloadedStrings, RankNTypes, ScopedTypeVariables, PatternSynonyms, ViewPatterns, MagicHash, RecordWildCards, BangPatterns, LambdaCase #-}
+{-# OPTIONS_GHC -fno-full-laziness #-}
 module Pure.DOM (inject) where
 
 -- from base
-import Control.Arrow ((&&&))
-import Control.Concurrent (MVar,newEmptyMVar,putMVar,takeMVar,tryPutMVar,yield,forkIO,myThreadId,killThread)
+import Control.Concurrent (MVar,newEmptyMVar,putMVar,takeMVar,yield,forkIO)
 import Control.Monad.ST (ST,runST)
 import Control.Monad.ST.Unsafe (unsafeIOToST)
-import Control.Monad (void,(<=<),unless,join,when)
+import Control.Monad (void,unless,join,when)
 import Data.Coerce (coerce)
 import Data.Foldable (for_,traverse_)
 import Data.Function (fix)
-import Data.IORef (IORef,newIORef,atomicModifyIORef',modifyIORef',readIORef,writeIORef)
-import Data.List as List (null,reverse,filter,lookup)
-import Data.Maybe (fromJust,isNothing)
-import Data.STRef (STRef,newSTRef,readSTRef,modifySTRef,modifySTRef,modifySTRef',writeSTRef)
+import Data.IORef (IORef,newIORef,modifyIORef',readIORef,writeIORef)
+import Data.List as List (null,reverse,filter)
+import Data.Maybe (fromJust)
+import Data.STRef (STRef,newSTRef,readSTRef,modifySTRef',writeSTRef)
 import Data.Traversable (for,traverse)
 import Data.Typeable (Typeable)
-import GHC.Exts (inline,lazy,reallyUnsafePtrEquality#,Any)
+import GHC.Exts (reallyUnsafePtrEquality#)
 import System.IO.Unsafe (unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
 import Prelude hiding (head)
 
--- from unordered-containers
+-- from containers
 import Data.Map.Lazy (Map)
+import Data.IntMap (IntMap)
 import Data.Set (Set)
 import Data.IntSet (IntSet)
-import qualified Data.Map.Lazy as Map (fromList,toList,insert,lookup,delete,difference,keys,foldlWithKey',empty,null,differenceWith)
+import qualified Data.Map.Strict as Map (fromList,toList,insert,difference,keys,differenceWith)
+import qualified Data.IntMap.Strict as IntMap (fromList,toList,insert,lookup,delete)
 import qualified Data.Set as Set (fromList,toList,insert,delete,null)
 import qualified Data.IntSet as IntSet (fromList,member)
 
@@ -58,7 +60,6 @@ import Pure.Data.Lifted
   -- node replacement
   ,replaceNode
   ,replaceText
-  ,insertBefore
 
   -- node removal
   ,removeNode
@@ -87,16 +88,11 @@ import Pure.Data.Lifted
   ,addEventListener
   ,removeEventListener
 
-  -- idle callback
-  ,requestIdleCallback
-
   -- node getters
-  ,getBody
   ,getDocument
-  ,getHead
   ,getWindow
 
-  -- JSV reference equality check
+  -- JSV reference equality
   ,same
 
   -- callbacks
@@ -112,13 +108,11 @@ import Pure.Data.Queue (Queue,newQueue,arrive,collect)
 
 -- from pure-txt
 import Pure.Data.Txt (Txt)
-import qualified Pure.Data.Txt as Txt (append,intercalate)
-
-import Debug.Trace
+import qualified Pure.Data.Txt as Txt (intercalate)
 
 type Plan s = STRef s [IO ()]
 type DiffST s a = a -> a -> a -> ST s a
-type DiffCtx s = STRef s (Node,Map Int View)
+type Removals s = STRef s (IntMap (View,View))
 
 {-# INLINE newPlan #-}
 newPlan :: ST s (Plan s)
@@ -132,7 +126,7 @@ buildPlan f = runST $ do
   a  <- f p p'
   p  <- readSTRef p
   p' <- readSTRef p'
-  p `seq` p' `seq` a `seq` return (p,p',a)
+  return (p,p',a)
 
 {-# INLINE amendPlan #-}
 amendPlan :: Plan s -> IO () -> ST s ()
@@ -145,9 +139,9 @@ runPlan = foldr (flip (>>)) (return ())
 yield_ :: IO ()
 yield_ =
 #ifndef RENDER_SYNC
-  yield
-#else
   return ()
+#else
+  yield
 #endif
 
 -- | Given a host node and a View, build and embed the View.
@@ -155,849 +149,835 @@ yield_ =
 inject :: IsNode e => e -> View -> IO ()
 inject host v = do
   mtd <- newIORef []
-  build True mtd (Just $ toNode host) v
+  !_ <- build True mtd (Just $ toNode host) v
   runPlan =<< readIORef mtd
+
+build :: Bool -> IORef [IO ()] -> Maybe Node -> View -> IO View
+build first mtd = go
   where
-    build :: Bool -> IORef [IO ()] -> Maybe Node -> View -> IO View
-    build first mtd = go
+    go mparent (SomeView _ r) = go mparent (view r)
+    go mparent v@ComponentView{} = buildComponent mtd mparent v
+    go mparent tv@(TextView{}) = do
+      tn <- createText (content tv)
+      for_ mparent (`append` tn)
+      return $ tv { textHost = Just tn }
+    go mparent HTMLView {..} = do
+      e <- create tag
+      for_ mparent (`append` e)
+      ls <- setFeatures e features
+      let n = Just (toNode e)
+      unless first yield_
+      cs <- traverse (go n) children
+      return $ HTMLView (Just e) tag features { listeners = ls } cs
+    go mparent RawView {..} = do
+      e <- create tag
+      for_ mparent (`append` e)
+      ls <- setFeatures e features
+      setInnerHTML e content
+      return $ RawView (Just e) tag features { listeners = ls } content
+    go mparent SVGView {..} = do
+      e <- createNS "http://www.w3.org/2000/svg" tag
+      ls <- setFeatures e features
+      for_ mparent (`append` e)
+      setXLinks e xlinks
+      let n = Just (toNode e)
+      unless first yield_
+      cs <- traverse (go n) children
+      return $ SVGView (Just e) tag features { listeners = ls } xlinks cs
+    go mparent KHTMLView {..} = do
+      e <- create tag
+      ls <- setFeatures e features
+      for_ mparent (`append` e)
+      let n = Just (toNode e)
+      unless first yield_
+      cs <- traverse (traverse (go n)) keyedChildren
+      return $ KHTMLView (Just e) tag features { listeners = ls } cs
+    go mparent KSVGView {..} = do
+      e <- createNS "http://www.w3.org/2000/svg" tag
+      ls <- setFeatures e features
+      setXLinks e xlinks
+      for_ mparent (`append` e)
+      let n = Just (toNode e)
+      unless first yield_
+      cs <- traverse (traverse (go n)) keyedChildren
+      return $ KSVGView (Just e) tag features { listeners = ls } xlinks cs
+    go mparent NullView{} = do
+      e <- create "template"
+      for_ mparent (`append` e)
+      return $ NullView (Just e)
+    go mparent PortalView{..} = do
+      e <- create "template"
+      for_ mparent (`append` e)
+      v <- go (Just $ toNode portalDestination) portalView
+      return $ PortalView (Just e) portalDestination v
+    go mparent (LazyView f a) = go mparent (view $ f a)
+
+    setXLinks :: Element -> Map Txt Txt -> IO ()
+    setXLinks e = traverse_ (uncurry (setAttributeNS e "http://www.w3.org/1999/xlink")) . Map.toList
+
+    setFeatures e Features_ {..} = do
+      setClasses e classes
+      setStyles e styles
+      setAttributes e attributes
+      setProperties e properties
+      for_ lifecycles (addLifecycle e)
+      for listeners (addListener e)
       where
-        go mparent (SomeView _ r) = go mparent (view r)
-        go mparent (ComponentView name props _ comp) = do
-          stq    <- newIORef . Just =<< newQueue
-          props_ <- newIORef props
-          state_ <- newIORef undefined
-          live_  <- newIORef undefined
-          let c = comp cr
-              cr = Ref name live_ props_ state_ c stq
-          state1 <- construct c
-          writeIORef state_ state1
-          state2 <- mount c state1
-          writeIORef state_ state2
-          let new = render c props state2
-          live <- go mparent new
-          writeIORef live_ live
-          modifyIORef' mtd ((mounted c):)
-          newComponentThread cr new live props state2
-          return $ ComponentView name props (Just cr) comp
-        go mparent (TextView _ t) = do
-          tn <- createText t
-          for_ mparent (`append` tn)
-          return $ TextView (Just tn) t
-        go mparent HTMLView {..} = do
-          e <- create tag
-          ls <- setFeatures e features
-          let n = Just (toNode e)
-          unless first yield_
-          cs <- for children (go n)
-          for_ mparent (`append` e)
-          return $ HTMLView (Just e) tag features { listeners = ls } cs
-        go mparent RawView {..} = do
-          e <- create tag
-          ls <- setFeatures e features
-          setInnerHTML e content
-          for_ mparent (`append` e)
-          return $ RawView (Just e) tag features { listeners = ls } content
-        go mparent SVGView {..} = do
-          e <- createNS "http://www.w3.org/2000/svg" tag
-          ls <- setFeatures e features
-          setXLinks e xlinks
-          let n = Just (toNode e)
-          unless first yield_
-          cs <- for children (go n)
-          for_ mparent (`append` e)
-          return $ SVGView (Just e) tag features { listeners = ls } xlinks cs
-        go mparent KHTMLView {..} = do
-          e <- create tag
-          ls <- setFeatures e features
-          let n = Just (toNode e)
-          unless first yield_
-          cs <- for keyedChildren (traverse (go n))
-          for_ mparent (`append` e)
-          return $ KHTMLView (Just e) tag features { listeners = ls } cs
-        go mparent KSVGView {..} = do
-          e <- createNS "http://www.w3.org/2000/svg" tag
-          ls <- setFeatures e features
-          setXLinks e xlinks
-          let n = Just (toNode e)
-          unless first yield_
-          cs <- for keyedChildren (traverse (go n))
-          for_ mparent (`append` e)
-          return $ KSVGView (Just e) tag features { listeners = ls } xlinks cs
-        go mparent NullView{} = do
-          e <- create "template"
-          for_ mparent (`append` e)
-          return $ NullView (Just e)
-        go mparent PortalView{..} = do
-          e <- create "template"
-          for_ mparent (`append` e)
-          v <- go (Just $ toNode portalDestination) portalView
-          return $ PortalView (Just e) portalDestination v
+        setClasses :: Element -> Set Txt -> IO ()
+        setClasses e cs
+          | Set.null cs = return ()
+          | otherwise   = setProperty e "className" $ Txt.intercalate " " $ Set.toList $ Set.delete "" cs
 
-        setXLinks :: Element -> Map Txt Txt -> IO ()
-        setXLinks e = traverse_ (uncurry (setAttributeNS e "http://www.w3.org/1999/xlink")) . Map.toList
+        setStyles :: Element -> Map Txt Txt -> IO ()
+        setStyles e = traverse_ (uncurry (setStyle e)) . Map.toList
 
-        setFeatures e Features_ {..} = do
-          setClasses e classes
-          setStyles e styles
-          setAttributes e attributes
-          setProperties e properties
-          for_ lifecycles (addLifecycle e)
-          for listeners (addListener e)
-          where
-            setClasses :: Element -> Set Txt -> IO ()
-            setClasses e cs
-              | Set.null cs = return ()
-              | otherwise   = setProperty e "className" $ Txt.intercalate " " $ Set.toList $ Set.delete "" cs
+        setAttributes :: Element -> Map Txt Txt -> IO ()
+        setAttributes e = traverse_ (uncurry (setAttribute e)) . Map.toList
 
-            setStyles :: Element -> Map Txt Txt -> IO ()
-            setStyles e = traverse_ (uncurry (setStyle e)) . Map.toList
+        setProperties :: Element -> Map Txt Txt -> IO ()
+        setProperties e = traverse_ (uncurry (setProperty e)) . Map.toList
 
-            setAttributes :: Element -> Map Txt Txt -> IO ()
-            setAttributes e = traverse_ (uncurry (setAttribute e)) . Map.toList
-
-            setProperties :: Element -> Map Txt Txt -> IO ()
-            setProperties e = traverse_ (uncurry (setProperty e)) . Map.toList
-
-            addListener :: Element -> Listener -> IO Listener
-            addListener e f@(On n t o a _) = do
+        addListener :: Element -> Listener -> IO Listener
+        addListener e f@(On n t o a _) = do
 #ifdef __GHCJS__
-                target <- case t of
-                            ElementTarget  -> return (toJSV e)
-                            WindowTarget   -> fmap toJSV getWindow
-                            DocumentTarget -> fmap toJSV getDocument
-                (cb,stopper) <- do
+            target <- case t of
+                        ElementTarget  -> return (toJSV e)
+                        WindowTarget   -> fmap toJSV getWindow
+                        DocumentTarget -> fmap toJSV getDocument
+            (cb,stopper) <- do
 
-                  stopper <- newIORef undefined
+              stopper <- newIORef undefined
 
-                  let stpr = join $ readIORef stopper
+              let stpr = join $ readIORef stopper
 
-                  cb <- syncCallback1 ContinueAsync $ \jsv -> do
-                    when (preventDef o) (preventDefault jsv)
-                    when (stopProp o) (stopPropagation jsv)
-                    a (Evt jsv target stpr)
+              cb <- syncCallback1 ContinueAsync $ \jsv -> do
+                when (preventDef o) (preventDefault jsv)
+                when (stopProp o) (stopPropagation jsv)
+                a (Evt jsv target stpr)
 
-                  writeIORef stopper $ do
-                    removeEventListener target n cb
-                    releaseCallback cb
+              writeIORef stopper $ do
+                removeEventListener target n cb
+                releaseCallback cb
 
-                  return (cb,stpr)
+              return (cb,stpr)
 
-                addEventListener target n cb (passive o)
-                return (On n t o a stopper)
+            addEventListener target n cb (passive o)
+            return (On n t o a stopper)
 #else
-                return f
+            return f
 #endif
 
-            addLifecycle :: Element -> Lifecycle -> IO Lifecycle
-            addLifecycle e (HostRef w) = do
-              modifyIORef' mtd ((w (toNode e)):)
-              return (HostRef w)
+        addLifecycle :: Element -> Lifecycle -> IO Lifecycle
+        addLifecycle e (HostRef w) = do
+          modifyIORef' mtd ((w (toNode e)):)
+          return (HostRef w)
 
-        {-# NOINLINE newComponentThread #-}
-        newComponentThread :: forall m props state. Ref m props state -> View -> View -> props -> state -> IO ()
-        newComponentThread ref@Ref { crComponent = Comp {..}, ..} view0 live0 props0 state0 = do
-            Just pq <- readIORef crPatchQueue
-            void $ forkIO $ execute $ do
-              executing
-              flip fix (view0,live0,props0,state0) $ \start (old,live,props,state) -> do
-                flip fix (props,state,[],[]) $ \worker (newProps,newState,acc,cps) ->
-                  case (acc,cps) of
-                    ([],[]) -> performIO (collect pq) >>= \cps -> worker (newProps,newState,[],cps)
-                    (acc,[]) -> do
-                      dus <- for (List.reverse acc) $ \(willUpd,didUpd,callback) -> do
-                        willUpd
-                        return (didUpd,callback)
-                      (new,new_live) <- performIO $ do
-                        let new =
-                              case reallyUnsafePtrEquality# props newProps of
-                                1# -> case reallyUnsafePtrEquality# state newState of
-                                        1# -> old
-                                        _  -> render props newState
-                                _  -> case reallyUnsafePtrEquality# state newState of
-                                        1# -> render newProps state
-                                        _  -> render newProps newState
-                        mtd <- newIORef []
-                        let (plan,plan',new_live) = buildPlan (\p p' -> diffDeferred mtd p p' live old new)
-                        mtd <- plan `seq` plan' `seq` readIORef mtd
-                        let hasAnimations = not $ List.null plan
-                            hasIdleWork = not $ List.null plan'
+buildComponent mtd mparent (ComponentView name props _ comp) = do
+  stq    <- newIORef . Just =<< newQueue
+  props_ <- newIORef props
+  state_ <- newIORef undefined
+  live_  <- newIORef undefined
+  let c = comp cr
+      cr = Ref name live_ props_ state_ c stq
+  state1 <- construct c
+  writeIORef state_ state1
+  state2 <- mount c state1
+  writeIORef state_ state2
+  let new = render c props state2
+  live <- build False mtd mparent new
+  writeIORef live_ live
+  modifyIORef' mtd ((mounted c):)
+  addIdleWork (newComponentThread cr new live props state2)
+  return $ ComponentView name props (Just cr) comp
+  where
+    newComponentThread ref@Ref { crComponent = Comp {..}, ..} view0 live0 props0 state0 = do
+        st <- newIORef (view0,live0,props0,state0,props0,state0)
+        Just pq <- readIORef crPatchQueue
+        void $ forkIO $ execute $ do
+          executing
+          flip fix ([],[]) $ \worker -> \case
+            ([],[]) -> performIO (collect pq) >>= \cps -> worker ([],cps)
+            (acc,[]) -> do
+              dus <- for (List.reverse acc) $ \(willUpd,didUpd,callback) -> do
+                willUpd
+                return (didUpd,callback)
+              new_live <- performIO $ do
+                (old,live,props,state,newProps,newState) <- readIORef st
+                let new =
+                      case reallyUnsafePtrEquality# props newProps of
+                        1# -> case reallyUnsafePtrEquality# state newState of
+                                1# -> old
+                                _  -> render props newState
+                        _  -> case reallyUnsafePtrEquality# state newState of
+                                1# -> render newProps state
+                                _  -> render newProps newState
+                mtd <- newIORef []
+                let (plan,plan',new_live) = buildPlan (\p p' -> do
+                        !new' <- diffDeferred mtd p p' live old new
+                        return new'
+                        )
+                writeIORef st (new,new_live,newProps,newState,newProps,newState)
+                mtd <- plan `seq` plan' `seq` readIORef mtd
+                let hasAnimations = not $ List.null plan
+                    hasIdleWork = not $ List.null plan'
+                if hasAnimations && hasIdleWork
+                  then do
+                    barrier <- newEmptyMVar
+                    addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : (writeIORef crView new_live) : plan )
+                    takeMVar barrier
+                  else do
+                    when hasAnimations $ do
+                      barrier <- newEmptyMVar
+                      addAnimationsReverse ( (putMVar barrier ()) : (writeIORef crView new_live) : plan )
+                      takeMVar barrier
+                    when hasIdleWork $ do
+                      void (addIdleWorksReverse plan')
+                runPlan mtd
+                return new_live
+              cbs <- for dus $ \(du,c) -> do
+                du new_live
+                return c
+              foldr (>>) (return ()) cbs
+              worker ([],[])
+            (acc,cp:cps) ->
+              case cp of
+                Unmount mv mtd -> do
+                  unmount
+                  performIO $ do
+                    (old,live,_,_,_,_) <- readIORef st
+                    writeIORef crPatchQueue Nothing
+                    let (plan,plan',res) = buildPlan $ \plan plan' ->
+                            let removeDeferred = do
+                                  amendPlan plan' (cleanup live)
+                                    -- for_ (getHost live) $ \host -> amendPlan plan' $ removeNodeMaybe host
+                                replaceDeferred old@(getHost -> oldHost) new@(getHost -> newHost) =
+                                  case oldHost of
+                                    Nothing -> error "Expected old host in replaceDeferred; got nothing."
+                                    Just oh ->
+                                      case newHost of
+                                        Nothing -> error "Expected new host in replaceDeferred; got nothing."
+                                        Just nh -> do
+                                          amendPlan plan  (replaceNode oh nh)
+                                          amendPlan plan' (cleanup old)
+                            in maybe removeDeferred (replaceDeferred live) mv
+                    plan `seq` plan' `seq`
+                      let hasAnimations = not $ List.null plan
+                          hasIdleWork   = not $ List.null plan'
+                      in
                         if hasAnimations && hasIdleWork
                           then do
                             barrier <- newEmptyMVar
-                            addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : (writeIORef crView new_live) : plan )
+                            addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : plan )
                             takeMVar barrier
                           else do
                             when hasAnimations $ do
                               barrier <- newEmptyMVar
-                              addAnimationsReverse ( (putMVar barrier ()) : (writeIORef crView new_live) : plan )
+                              addAnimationsReverse ( (putMVar barrier ()) : plan )
                               takeMVar barrier
                             when hasIdleWork $ do
-                              void (addIdleWorksReverse plan')
-                        runPlan mtd
-                        return (new,new_live)
-                      cbs <- for dus $ \(du,c) -> do
-                        du new_live
-                        return c
-                      sequence_ cbs
-                      start (new,new_live,newProps,newState)
-                    (acc,cp:cps) ->
-                      case cp of
-                        Unmount mv mtd -> do
-                          unmount
-                          performIO $ do
-                            writeIORef crPatchQueue Nothing
-                            live <- readIORef crView
-                            let (plan,plan',res) = buildPlan $ \plan plan' ->
-                                    let removeDeferred = do
-                                          amendPlan plan' (cleanup live)
-                                            -- for_ (getHost live) $ \host -> amendPlan plan' $ removeNodeMaybe host
-                                        replaceDeferred old@(getHost -> oldHost) new@(getHost -> newHost) =
-                                          case oldHost of
-                                            Nothing -> error "Expected old host in replaceDeferred; got nothing."
-                                            Just oh ->
-                                              case newHost of
-                                                Nothing -> error "Expected new host in replaceDeferred; got nothing."
-                                                Just nh -> do
-                                                  amendPlan plan  (replaceNode oh nh)
-                                                  amendPlan plan' (cleanup old)
-                                    in maybe removeDeferred (replaceDeferred live) mv
-                            plan `seq` plan' `seq`
-                              let hasAnimations = not $ List.null plan
-                                  hasIdleWork   = not $ List.null plan'
-                              in
-                                if hasAnimations && hasIdleWork
-                                  then do
-                                    barrier <- newEmptyMVar
-                                    addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : plan )
-                                    takeMVar barrier
-                                  else do
-                                    when hasAnimations $ do
-                                      barrier <- newEmptyMVar
-                                      addAnimationsReverse ( (putMVar barrier ()) : plan )
-                                      takeMVar barrier
-                                    when hasIdleWork $ do
-                                      void $ addIdleWorksReverse plan'
-                            mtd
-                          unmounted
-                        UpdateProperties newProps' -> do
-                          newState'    <- receive newProps' newState
-                          shouldUpdate <- force   newProps' newState'
-                          let writeRefs = writeIORef crProps newProps' >> writeIORef crState newState'
-                          if shouldUpdate || not (List.null acc) then
-                            let
-                              will = update  newProps' newState'
-                              did  = updated newProps  newState
-                            in
-                              worker (newProps',newState',(will >> performIO writeRefs,did,performIO (return ())) : acc,cps)
-                          else do
-                            performIO writeRefs
-                            worker (newProps',newState',acc,cps)
-                        UpdateState f -> do
-                          (newState',updatedCallback) <- f newProps newState
-                          shouldUpdate                <- force newProps newState'
-                          let writeRef = writeIORef crState newState'
-                          if shouldUpdate || not (List.null acc) then
-                            let
-                              will = update  newProps newState'
-                              did  = updated newProps newState
-                            in
-                              worker (newProps,newState',(will >> performIO writeRef,did,updatedCallback) : acc,cps)
-                          else do
-                            performIO writeRef
-                            worker (newProps,newState',acc,cps)
+                              void $ addIdleWorksReverse plan'
+                    mtd
+                  unmounted
+                UpdateProperties newProps' -> do
+                  (old,live,props,state,newProps,newState) <- performIO $ readIORef st
+                  newState'    <- receive newProps' newState
+                  shouldUpdate <- force   newProps' newState'
+                  performIO $ writeIORef st (old,live,props,state,newProps',newState')
+                  let writeRefs = writeIORef crProps newProps' >> writeIORef crState newState'
+                  if shouldUpdate || not (List.null acc) then do
+                    let
+                      will = update  newProps' newState'
+                      did  = updated newProps  newState
+                    worker ((will >> performIO writeRefs,did,performIO (return ())) : acc,cps)
+                  else do
+                    performIO writeRefs
+                    worker (acc,cps)
+                UpdateState f -> do
+                  (old,live,props,state,newProps,newState) <- performIO $ readIORef st
+                  (newState',updatedCallback) <- f newProps newState
+                  shouldUpdate                <- force newProps newState'
+                  performIO $ writeIORef st (old,live,props,state,newProps,newState')
+                  let writeRef = writeIORef crState newState'
+                  if shouldUpdate || not (List.null acc) then
+                    let
+                      will = update  newProps newState'
+                      did  = updated newProps newState
+                    in
+                      worker ((will >> performIO writeRef,did,updatedCallback) : acc,cps)
+                  else do
+                    performIO writeRef
+                    worker (acc,cps)
 
-          where
-            cleanupListener :: Listener -> IO ()
-            cleanupListener (On _ _ _ _ stp) = stp
+cleanupListener :: Listener -> IO ()
+cleanupListener (On _ _ _ _ stp) = stp
 
-            cleanup :: View -> IO ()
-            cleanup RawView {..} =
-              for_ (listeners features) cleanupListener
-            cleanup HTMLView {..} = do
-              for_ (listeners features) cleanupListener
-              for_ children cleanup
-            cleanup SVGView {..} = do
-              for_ (listeners features) cleanupListener
-              for_ children cleanup
-            cleanup ComponentView {..} = do
-              for_ record (\r -> queueComponentUpdate r (Unmount Nothing (return ())))
-            cleanup PortalView {..} = do
-              cleanup portalView
-            cleanup KHTMLView {..} = do
-              for_ (listeners features) cleanupListener
-              for_ keyedChildren (cleanup . snd)
-            cleanup KSVGView {..} = do
-              for_ (listeners features) cleanupListener
-              for_ keyedChildren (cleanup . snd)
-            cleanup _ = return ()
+cleanup :: View -> IO ()
+cleanup RawView {..} =
+  for_ (listeners features) cleanupListener
+cleanup HTMLView {..} = do
+  for_ (listeners features) cleanupListener
+  for_ children cleanup
+cleanup SVGView {..} = do
+  for_ (listeners features) cleanupListener
+  for_ children cleanup
+cleanup ComponentView {..} = do
+  for_ record (\r -> queueComponentUpdate r (Unmount Nothing (return ())))
+cleanup PortalView {..} = do
+  cleanup portalView
+cleanup KHTMLView {..} = do
+  for_ (listeners features) cleanupListener
+  for_ keyedChildren (cleanup . snd)
+cleanup KSVGView {..} = do
+  for_ (listeners features) cleanupListener
+  for_ keyedChildren (cleanup . snd)
+cleanup _ = return ()
 
-            diffDeferred :: forall s. IORef [IO ()] -> Plan s -> Plan s -> View -> View -> View -> ST s View
-            diffDeferred mounted plan plan' old !mid !new =
+diffDeferred :: forall s. IORef [IO ()] -> Plan s -> Plan s -> View -> View -> View -> ST s View
+diffDeferred mounted plan plan' old mid new =
 
-              case reallyUnsafePtrEquality# mid new of
-                1# -> return old
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return old
 
-                _  ->
-                  let
-                      replace = unsafeIOToST (build False mounted Nothing new) >>= replaceDeferred plan plan' old
-                  in
-                    case (mid,new) of
-                      (ComponentView t p _ v,ComponentView t' p' _ v') -> unsafeIOToST $
-                        case reallyUnsafePtrEquality# p (unsafeCoerce p') of
-                          1# -> return old
-                          _  ->
-                                  case old of
-                                    ComponentView _ _ ~(Just r0) _ ->
-                                      case reallyUnsafePtrEquality# t t' of
-                                        0# | t /= t' -> do
-                                          mtd <- newIORef []
-                                          new' <- build False mtd Nothing new
-                                          queueComponentUpdate r0 (Unmount (Just new') (readIORef mtd >>= runPlan))
-                                          return new'
-                                        _ -> do
-                                          let r = unsafeCoerce r0
-                                          setProps r p'
-                                          return (ComponentView t' p' (Just r) v')
+    _  ->
+      let
+          replace = do
+            !new' <- unsafeIOToST (build False mounted Nothing new)
+            replaceDeferred plan plan' old new'
+      in
+        case (mid,new) of
+          (LazyView f a,LazyView f' a') ->
+            case reallyUnsafePtrEquality# f (unsafeCoerce f') of
+              1# -> case reallyUnsafePtrEquality# a (unsafeCoerce a') of
+                      1# -> return old
+                      _  -> diffDeferred mounted plan plan' old (view (f a)) (view (f' a'))
+              _  -> replace
 
-                      (HTMLView{},HTMLView{}) ->
-                        case reallyUnsafePtrEquality# (tag mid) (tag new) of
-                          1# -> diffElementDeferred mounted plan plan' old mid new
-                          _ | tag mid == tag new -> diffElementDeferred mounted plan plan' old mid new
-                            | otherwise          -> replace
+          (ComponentView t p _ v,ComponentView t' p' _ v') -> unsafeIOToST $
+            case reallyUnsafePtrEquality# p (unsafeCoerce p') of
+              1# -> return old
+              _  ->
+                      case old of
+                        ComponentView _ _ ~(Just r0) _ ->
+                          case reallyUnsafePtrEquality# t t' of
+                            0# | t /= t' -> do
+                              mtd <- newIORef []
+                              !new' <- build False mtd Nothing new
+                              queueComponentUpdate r0 (Unmount (Just new') (readIORef mtd >>= runPlan))
+                              return new'
+                            _ -> do
+                              let r = unsafeCoerce r0
+                              setProps r p'
+                              return (ComponentView t' p' (Just r) v')
 
-                      (TextView _ t,TextView _ t') ->
-                        case reallyUnsafePtrEquality# t t' of
-                          0# | t /= t' -> replaceTextContentDeferred plan old new
-                          _ -> return old
+          (HTMLView{},HTMLView{}) ->
+            case reallyUnsafePtrEquality# (tag mid) (tag new) of
+              1# -> diffElementDeferred mounted plan plan' old mid new
+              _ | tag mid == tag new -> diffElementDeferred mounted plan plan' old mid new
+                | otherwise          -> replace
 
-                      (NullView{},NullView{}) -> return old
+          (TextView _ t,TextView _ t') ->
+            case reallyUnsafePtrEquality# t t' of
+              0# | t /= t' -> replaceTextContentDeferred plan old new
+              _            -> return old
 
-                      (SomeView t m,SomeView t' n) ->
-                        case reallyUnsafePtrEquality# m (unsafeCoerce n) of
-                          1# -> return old
-                          _  ->
-                            case reallyUnsafePtrEquality# t t' of
-                              0# | t /= t' -> replace
-                              _            -> diffDeferred mounted plan plan' old (view m) (view n)
+          (NullView{},NullView{}) -> return old
 
-                      (SVGView{},SVGView{})
-                        | tag mid == tag new -> diffElementDeferred mounted plan plan' old mid new
-                        | otherwise          -> replace
+          (RawView{},RawView{}) ->
+            case reallyUnsafePtrEquality# (tag mid) (tag new) of
+              1# -> do
+                case reallyUnsafePtrEquality# (content mid) (content new) of
+                  1# -> do
+                    fs <- diffFeaturesDeferred (coerce $ fromJust $ getHost old) plan plan' (features old) (features mid) (features new)
+                    return old { features = fs }
+                  _  -> replace
+              _ -> replace
 
-                      (KHTMLView{},KHTMLView{})
-                        | tag mid == tag new -> diffKeyedElementDeferred mounted plan plan' old mid new
-                        | otherwise          -> replace
+          (SomeView t m,SomeView t' n) ->
+            case reallyUnsafePtrEquality# m (unsafeCoerce n) of
+              1# -> return old
+              _  ->
+                case reallyUnsafePtrEquality# t t' of
+                  0# | t /= t' -> replace
+                  _            -> diffDeferred mounted plan plan' old (view m) (view n)
 
-                      (KSVGView{},KSVGView{})
-                        | tag mid == tag new -> diffKeyedElementDeferred mounted plan plan' old mid new
-                        | otherwise          -> replace
+          (SVGView{},SVGView{}) ->
+            case reallyUnsafePtrEquality# (tag mid) (tag new) of
+              1# -> diffSVGElementDeferred mounted plan plan' old mid new
+              _ | tag mid == tag new -> diffSVGElementDeferred mounted plan plan' old mid new
+                | otherwise          -> replace
 
-                      (PortalView{},PortalView{})
-                        | same (toJSV (portalDestination old)) (toJSV (portalDestination new)) -> do
-                          v <- diffElementDeferred mounted plan plan' (portalView old) (portalView mid) (portalView new)
-                          return old { portalView = v }
-                        | otherwise -> do
-                          built@(getHost -> Just h) <- unsafeIOToST (build False mounted Nothing (portalView new))
-                          amendPlan plan' (cleanup old)
-                          amendPlan plan $ do
-                            for_ (getHost (portalView old)) removeNode
-                            append (toNode $ portalDestination new) h
-                          -- recycling the portalProxy
-                          return (PortalView (portalProxy old) (portalDestination new) built)
+          (KHTMLView{},KHTMLView{}) ->
+            case reallyUnsafePtrEquality# (tag mid) (tag new) of
+              1# -> diffKeyedElementDeferred mounted plan plan' old mid new
+              _ | tag mid == tag new -> diffKeyedElementDeferred mounted plan plan' old mid new
+                | otherwise          -> replace
 
-                      (_,PortalView{}) -> do
-                        proxy <- unsafeIOToST (build False mounted Nothing (NullView Nothing))
-                        replaceDeferred plan plan' old proxy
-                        built@(getHost -> Just h) <- unsafeIOToST (build False mounted Nothing (portalView new))
-                        amendPlan plan $ append (toNode $ portalDestination new) h
-                        return (PortalView (fmap coerce $ getHost proxy) (portalDestination new) built)
+          (KSVGView{},KSVGView{}) ->
+            case reallyUnsafePtrEquality# (tag mid) (tag new) of
+              1# -> diffSVGKeyedElementDeferred mounted plan plan' old mid new
+              _ | tag mid == tag new -> diffSVGKeyedElementDeferred mounted plan plan' old mid new
+                | otherwise          -> replace
 
-                      (PortalView{},_) -> do
-                        amendPlan plan (cleanup old)
-                        amendPlan plan $ for_ (getHost (portalView old)) removeNode
-                        replace
+          (PortalView{},PortalView{})
+            | same (toJSV (portalDestination old)) (toJSV (portalDestination new)) -> do
+              v <- diffElementDeferred mounted plan plan' (portalView old) (portalView mid) (portalView new)
+              return old { portalView = v }
+            | otherwise -> do
+              !built@(getHost -> Just h) <- unsafeIOToST (build False mounted Nothing (portalView new))
+              amendPlan plan' (cleanup old)
+              amendPlan plan $ do
+                for_ (getHost (portalView old)) removeNode
+                append (toNode $ portalDestination new) h
+              -- recycling the portalProxy
+              return (PortalView (portalProxy old) (portalDestination new) built)
 
-                      _ -> replace
+          (_,PortalView{}) -> do
+            !proxy <- unsafeIOToST (build False mounted Nothing (NullView Nothing))
+            replaceDeferred plan plan' old proxy
+            !built@(getHost -> Just h) <- unsafeIOToST (build False mounted Nothing (portalView new))
+            amendPlan plan $ append (toNode $ portalDestination new) h
+            return (PortalView (fmap coerce $ getHost proxy) (portalDestination new) built)
 
-              where
-                diffElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
-                diffElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
-                  fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
-                  unsafeIOToST yield_
-                  cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
-                  return old
-                    { features = fs
-                    , children = cs
-                    }
+          (PortalView{},_) -> do
+            amendPlan plan (cleanup old)
+            amendPlan plan $ for_ (getHost (portalView old)) removeNode
+            replace
 
-                diffSVGElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
-                diffSVGElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
-                  fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
-                  diffXLinksDeferred e plan (xlinks mid) (xlinks new)
-                  unsafeIOToST yield_
-                  cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
-                  return old
-                    { features = fs
-                    , children = cs
-                    }
+          _ -> replace
 
-                diffFeaturesDeferred :: Element -> Plan s -> Plan s -> DiffST s Features
-                diffFeaturesDeferred e plan plan' old !mid !new = do
-                  case reallyUnsafePtrEquality# mid new of
-                    1# -> return old
-                    _  -> do
-                      diffClassesDeferred    e plan (classes mid) (classes new)
-                      diffStylesDeferred     e plan (styles mid) (styles new)
-                      diffAttributesDeferred e plan (attributes mid) (attributes new)
-                      diffPropertiesDeferred e plan (properties mid) (properties new)
-                      ls <- diffListenersDeferred e plan plan' (listeners old) (listeners mid) (listeners new)
-                      diffLifecyclesDeferred e plan (lifecycles old) (lifecycles mid) (lifecycles new)
-                      return old { listeners = ls }
+diffElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
+diffElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
+  !fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
+  unsafeIOToST yield_
+  !cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
+  return old
+    { features = fs
+    , children = cs
+    }
 
-                diffXLinksDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
-                diffXLinksDeferred e p !mid !new =
-                  case reallyUnsafePtrEquality# mid new of
-                    1# -> return ()
-                    _  -> do
+diffSVGElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
+diffSVGElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
+  !fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
+  diffXLinksDeferred e plan (xlinks mid) (xlinks new)
+  unsafeIOToST yield_
+  !cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
+  return old
+    { features = fs
+    , children = cs
+    }
 
-                      let remove = removeAttributeNS e "http://www.w3.org/1999/xlink"
-                          !removals = Map.keys (Map.difference mid new)
-                          !r = traverse_ remove removals
-                      amendPlan p r
+diffFeaturesDeferred :: Element -> Plan s -> Plan s -> DiffST s Features
+diffFeaturesDeferred e plan plan' old !mid !new = do
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return old
+    _  -> do
+      diffClassesDeferred    e plan (classes mid) (classes new)
+      diffStylesDeferred     e plan (styles mid) (styles new)
+      diffAttributesDeferred e plan (attributes mid) (attributes new)
+      diffPropertiesDeferred e plan (properties mid) (properties new)
+      ls <- diffListenersDeferred e plan plan' (listeners old) (listeners mid) (listeners new)
+      diffLifecyclesDeferred e plan (lifecycles old) (lifecycles mid) (lifecycles new)
+      return old { listeners = ls }
 
-                      let add (k,v) = setAttributeNS e "http://www.w3.org/1999/xlink" k v
-                          !adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
-                          !a = traverse_ add adds
-                      amendPlan p a
+diffXLinksDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
+diffXLinksDeferred e p !mid !new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return ()
+    _  -> do
 
-                diffClassesDeferred :: Element ->Plan s -> Set Txt -> Set Txt -> ST s ()
-                diffClassesDeferred e p !mid !new =
-                  case reallyUnsafePtrEquality# mid new of
-                    1# -> return ()
-                    _  -> amendPlan p (setProperty e "className" $ Txt.intercalate " " $ Set.toList $ Set.delete "" new)
+      let remove = removeAttributeNS e "http://www.w3.org/1999/xlink"
+          !removals = Map.keys (Map.difference mid new)
+          !r = traverse_ remove removals
+      amendPlan p r
 
-                diffStylesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
-                diffStylesDeferred e p !mid !new =
-                  case reallyUnsafePtrEquality# mid new of
-                    1# -> return ()
-                    _  -> do
+      let add (k,v) = setAttributeNS e "http://www.w3.org/1999/xlink" k v
+          !adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
+          !a = traverse_ add adds
+      amendPlan p a
 
-                      let remove = removeStyle e
-                          !removes = Map.keys (Map.difference mid new)
-                          !r = traverse_ remove removes
-                      amendPlan p r
+diffClassesDeferred :: Element ->Plan s -> Set Txt -> Set Txt -> ST s ()
+diffClassesDeferred e p !mid !new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return ()
+    _  -> amendPlan p (setProperty e "className" $ Txt.intercalate " " $ Set.toList $ Set.delete "" new)
 
-                      let add (k,v) = setStyle e k v
-                          !adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
-                          !a = traverse_ add adds
-                      amendPlan p a
+diffStylesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
+diffStylesDeferred e p !mid !new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return ()
+    _  -> do
 
-                removeStyles :: Element -> Map Txt Txt -> IO ()
-                removeStyles e = traverse_ (removeStyle e . fst) . Map.toList
+      let remove = removeStyle e
+          !removes = Map.keys (Map.difference mid new)
+          !r = traverse_ remove removes
+      amendPlan p r
 
-                removeAttributes :: Element -> Map Txt Txt -> IO ()
-                removeAttributes e = traverse_ (removeAttribute e . fst) . Map.toList
+      let add (k,v) = setStyle e k v
+          !adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
+          !a = traverse_ add adds
+      amendPlan p a
 
-                removeProperties :: Element -> Map Txt Txt -> IO ()
-                removeProperties e = traverse_ (removeProperty e . fst) . Map.toList
+diffAttributesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
+diffAttributesDeferred e p !mid !new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return ()
+    _  -> do
 
-                diffAttributesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
-                diffAttributesDeferred e p !mid !new =
-                  case reallyUnsafePtrEquality# mid new of
-                    1# -> return ()
-                    _  -> do
+      let remove = removeAttribute e
+          !removes = Map.keys (Map.difference mid new)
+          !r = traverse_ remove removes
+      amendPlan p r
 
-                      let remove = removeAttribute e
-                          !removes = Map.keys (Map.difference mid new)
-                          !r = traverse_ remove removes
-                      amendPlan p r
+      let add (k,v) = setAttribute e k v
+          !adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
+          !a = traverse_ add adds
+      amendPlan p a
 
-                      let add (k,v) = setAttribute e k v
-                          !adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
-                          !a = traverse_ add adds
-                      amendPlan p a
+diffPropertiesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
+diffPropertiesDeferred e p !mid !new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return ()
+    _  -> do
 
-                diffPropertiesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
-                diffPropertiesDeferred e p !mid !new =
-                  case reallyUnsafePtrEquality# mid new of
-                    1# -> return ()
-                    _  -> do
+      let remove = removeProperty e
+          !removes = Map.keys (Map.difference mid new)
+          !r = traverse_ remove removes
+      amendPlan p r
 
-                      let remove = removeProperty e
-                          !removes = Map.keys (Map.difference mid new)
-                          !r = traverse_ remove removes
-                      amendPlan p r
+      let add (k,v) = setProperty e k v
+          !adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
+          !a = traverse_ add adds
+      amendPlan p a
 
-                      let add (k,v) = setProperty e k v
-                          !adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
-                          !a = traverse_ add adds
-                      amendPlan p a
-
-                addListenerDeferred :: Element -> Plan s -> Listener -> ST s Listener
-                addListenerDeferred e plan l@(On n t o a _) = do
+addListenerDeferred :: Element -> Plan s -> Listener -> ST s Listener
+addListenerDeferred e plan l@(On n t o a _) = do
 #ifdef __GHCJS__
-                  (target,cb,stopper) <- unsafeIOToST $ do
-                    target <- case t of
-                                ElementTarget  -> return (toJSV e)
-                                WindowTarget   -> fmap toJSV getWindow
-                                DocumentTarget -> fmap toJSV getDocument
-                    (cb,stopper) <- do
+  (target,cb,stopper) <- unsafeIOToST $ do
+    target <- case t of
+                ElementTarget  -> return (toJSV e)
+                WindowTarget   -> fmap toJSV getWindow
+                DocumentTarget -> fmap toJSV getDocument
+    (cb,stopper) <- do
 
-                            stopper <- newIORef undefined
+            stopper <- newIORef undefined
 
-                            let stpr = join $ readIORef stopper
+            let stpr = join $ readIORef stopper
 
-                            cb <- syncCallback1 ContinueAsync $ \jsv -> do
-                              when (preventDef o) (preventDefault jsv)
-                              when (stopProp o) (stopPropagation jsv)
-                              a (Evt jsv target stpr)
+            cb <- syncCallback1 ContinueAsync $ \jsv -> do
+              when (preventDef o) (preventDefault jsv)
+              when (stopProp o) (stopPropagation jsv)
+              a (Evt jsv target stpr)
 
-                            writeIORef stopper $ do
-                              removeEventListener target n cb
-                              releaseCallback cb
+            writeIORef stopper $ do
+              removeEventListener target n cb
+              releaseCallback cb
 
-                            return (cb,stpr)
+            return (cb,stpr)
 
-                    return (target,cb,stopper)
+    return (target,cb,stopper)
 
-                  amendPlan plan (addEventListener target n cb (passive o))
-                  return (On n t o a stopper)
+  amendPlan plan (addEventListener target n cb (passive o))
+  return (On n t o a stopper)
 #else
-                  return l
+  return l
 #endif
 
-                removeListenerDeferred :: Plan s -> Listener -> ST s ()
-                removeListenerDeferred p (On _ _ _ _ stp) = amendPlan p stp
+removeListenerDeferred :: Plan s -> Listener -> ST s ()
+removeListenerDeferred p (On _ _ _ _ stp) = amendPlan p stp
 
-                diffListenersDeferred :: Element -> Plan s -> Plan s -> [Listener] -> [Listener] -> [Listener] -> ST s [Listener]
-                diffListenersDeferred e p p' old !mid !new =
-                  case reallyUnsafePtrEquality# mid new of
-                    1# -> return old
-                    _  -> do
-                      let om = zip old mid
+diffListenersDeferred :: Element -> Plan s -> Plan s -> [Listener] -> [Listener] -> [Listener] -> ST s [Listener]
+diffListenersDeferred e p p' old !mid !new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return old
+    _  -> do
+      let om = zip old mid
 
-                      -- removes
-                      for_ om $ \(o,m) -> do
-                        case unsafeLookup new m of
-                          Nothing -> removeListenerDeferred p' o
-                          Just n  -> return ()
+      -- removes
+      for_ om $ \(o,m) -> do
+        case unsafeLookup new m of
+          Nothing -> removeListenerDeferred p' o
+          Just n  -> return ()
 
-                      -- adds
-                      for new $ \n -> do
-                        case unsafeLookupPair om n of
-                          Nothing -> addListenerDeferred e p n
-                          Just o  -> return o
+      -- adds
+      for new $ \n -> do
+        case unsafeLookupPair om n of
+          Nothing -> addListenerDeferred e p n
+          Just o  -> return o
 
-                unsafeLookup :: [a] -> a -> Maybe a
-                unsafeLookup [] _ = Nothing
-                unsafeLookup (x : xs) n =
-                  case reallyUnsafePtrEquality# x n of
-                    1# -> Just x
-                    _  -> unsafeLookup xs n
+unsafeLookup :: [a] -> a -> Maybe a
+unsafeLookup [] _ = Nothing
+unsafeLookup (x : xs) n =
+  case reallyUnsafePtrEquality# x n of
+    1# -> Just x
+    _  -> unsafeLookup xs n
 
-                unsafeLookupPair :: [(a,a)] -> a -> Maybe a
-                unsafeLookupPair [] _ = Nothing
-                unsafeLookupPair ((o,m) : xs) n =
-                  case reallyUnsafePtrEquality# m n of
-                    1# -> Just o
-                    _  -> unsafeLookupPair xs n
+unsafeLookupPair :: [(a,a)] -> a -> Maybe a
+unsafeLookupPair [] _ = Nothing
+unsafeLookupPair ((o,m) : xs) n =
+  case reallyUnsafePtrEquality# m n of
+    1# -> Just o
+    _  -> unsafeLookupPair xs n
 
-                addLifecycleDeferred :: Element -> Plan s -> Lifecycle -> ST s ()
-                addLifecycleDeferred e p (HostRef w) = amendPlan p $ w (toNode e)
+addLifecycleDeferred :: Element -> Plan s -> Lifecycle -> ST s ()
+addLifecycleDeferred e p (HostRef w) = amendPlan p $ w (toNode e)
 
-                diffLifecyclesDeferred :: Element -> Plan s -> [Lifecycle] -> [Lifecycle] -> [Lifecycle] -> ST s ()
-                diffLifecyclesDeferred e p old !mid !new =
-                  case reallyUnsafePtrEquality# mid new of
-                    1# -> return ()
-                    _  ->
-                      let adds = List.filter (not . (old `unsafeContains`)) new
-                      in for_ adds (addLifecycleDeferred e p)
+diffLifecyclesDeferred :: Element -> Plan s -> [Lifecycle] -> [Lifecycle] -> [Lifecycle] -> ST s ()
+diffLifecyclesDeferred e p old !mid !new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return ()
+    _  ->
+      let adds = List.filter (not . (old `unsafeContains`)) new
+      in for_ adds (addLifecycleDeferred e p)
 
-                unsafeContains :: [a] -> a -> Bool
-                unsafeContains [] _ = False
-                unsafeContains (x : xs) a =
-                  case reallyUnsafePtrEquality# x a of
-                    1# -> True
-                    _  -> unsafeContains xs a
+unsafeContains :: [a] -> a -> Bool
+unsafeContains [] _ = False
+unsafeContains (x : xs) a =
+  case reallyUnsafePtrEquality# x a of
+    1# -> True
+    _  -> unsafeContains xs a
 
-                -- styleDiff :: Element -> Map Txt Txt -> Map Txt Txt -> Map Txt (IO ())
-                -- styleDiff e = Map.mergeWithKey diff remove add
-                --   where
-                --     diff nm val1 val2
-                --       | val1 == val2           = Nothing
-                --       | otherwise              = Just $ setStyle e nm val2
-                --     remove = Map.mapWithKey (\nm  _  -> removeStyle e nm)
-                --     add    = Map.mapWithKey (\nm val -> setStyle e nm val)
+-- styleDiff :: Element -> Map Txt Txt -> Map Txt Txt -> Map Txt (IO ())
+-- styleDiff e = Map.mergeWithKey diff remove add
+--   where
+--     diff nm val1 val2
+--       | val1 == val2           = Nothing
+--       | otherwise              = Just $ setStyle e nm val2
+--     remove = Map.mapWithKey (\nm  _  -> removeStyle e nm)
+--     add    = Map.mapWithKey (\nm val -> setStyle e nm val)
 
-                diffChildrenDeferred :: Element -> IORef [IO ()] -> Plan s -> Plan s -> DiffST s [View]
-                diffChildrenDeferred (toNode -> e) mounted plan plan' = cleanupCheck
-                  where
-                    cleanupCheck :: DiffST s [View]
-                    cleanupCheck olds mids news = do
-                      case reallyUnsafePtrEquality# mids news of
-                        1# -> return olds
-                        _  -> if List.null news
-                                then do
-                                  amendPlan plan (clearNode e)
-                                  let cs = fmap cleanup olds
-                                  for_ cs $ \c -> c `seq` amendPlan plan' c
-                                  return []
-                                else go olds mids news
+diffChildrenDeferred :: forall s. Element -> IORef [IO ()] -> Plan s -> Plan s -> DiffST s [View]
+diffChildrenDeferred (toNode -> e) mounted plan plan' = cleanupCheck
+  where
+    cleanupCheck :: DiffST s [View]
+    cleanupCheck olds mids news = do
+      case reallyUnsafePtrEquality# mids news of
+        1# -> return olds
+        _  -> if List.null news
+                then do
+                  amendPlan plan (clearNode e)
+                  let cs = fmap cleanup olds
+                  for_ cs (amendPlan plan')
+                  return []
+                else go olds mids news
 
-                    start :: DiffST s [View]
-                    start olds mids news =
-                      case reallyUnsafePtrEquality# mids news of
-                        1# -> return olds
-                        _  -> go olds mids news
+    start :: DiffST s [View]
+    start olds mids news =
+      case reallyUnsafePtrEquality# mids news of
+        1# -> return olds
+        _  -> go olds mids news
 
-                    go :: DiffST s [View]
-                    go olds _ [] = do
-                      for_ olds (removeDeferred plan plan')
-                      return []
+    go :: DiffST s [View]
+    go olds _ [] = do
+      !_ <- for_ olds (removeDeferred plan plan')
+      return []
 
-                    go [] _ news = do
-                      frag <- unsafeIOToST createFrag
-                      let n = Just (toNode frag)
-                      news' <- for news (unsafeIOToST . build False mounted n)
-                      amendPlan plan (append e frag)
-                      return news'
+    go [] _ news = do
+      frag <- unsafeIOToST createFrag
+      let n = Just (toNode frag)
+      !news' <- for news $ \new -> do
+        !new' <- unsafeIOToST (build False mounted n new)
+        return new'
+      amendPlan plan (append e frag)
+      return news'
 
-                    go (old:olds) (mid:mids) (new:news) = do
-                      new'  <- diffDeferred mounted plan plan' old mid new
-                      news' <- start olds mids news
-                      return (new' : news')
+    go (old:olds) (mid:mids) (new:news) = do
+      !new'  <- diffDeferred mounted plan plan' old mid new
+      !news' <- start olds mids news
+      return (new' : news')
 
-                removeDeferred :: Plan s -> Plan s -> View -> ST s ()
-                removeDeferred plan plan' v = do
-                  for_ (getHost v) $ \host -> amendPlan plan $ do
-                    removeNodeMaybe host
-                  amendPlan plan' (cleanup v)
+removeDeferred :: Plan s -> Plan s -> View -> ST s ()
+removeDeferred plan plan' v = do
+  for_ (getHost v) (amendPlan plan . removeNodeMaybe)
+  amendPlan plan' (cleanup v)
 
-                replaceDeferred :: Plan s -> Plan s -> View -> View -> ST s View
-                replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) =
-                  case oldHost of
-                    Nothing -> error "Expected old host in replaceDeferred; got nothing."
-                    Just oh ->
-                      case newHost of
-                        Nothing -> error "Expected new host in replaceDeferred; got nothing."
-                        Just nh -> do
-                          amendPlan plan (replaceNode oh nh)
-                          amendPlan plan' (cleanup old)
-                          return new
+replaceDeferred :: Plan s -> Plan s -> View -> View -> ST s View
+replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) =
+  case oldHost of
+    Nothing -> error "Expected old host in replaceDeferred; got nothing."
+    Just oh ->
+      case newHost of
+        Nothing -> error "Expected new host in replaceDeferred; got nothing."
+        Just nh -> do
+          amendPlan plan (replaceNode oh nh)
+          amendPlan plan' (cleanup old)
+          return new
 
-                replaceTextContentDeferred :: Plan s -> View -> View -> ST s View
-                replaceTextContentDeferred plan old@(textHost -> Just oh) new = do
-                  amendPlan plan (oh `replaceText` content new)
-                  return old { content = content new }
+replaceTextContentDeferred :: Plan s -> View -> View -> ST s View
+replaceTextContentDeferred plan old@(textHost -> Just oh) new = do
+  amendPlan plan (oh `replaceText` content new)
+  return new { textHost = Just oh }
 
-                diffSVGKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
-                diffSVGKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
-                  fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
-                  diffXLinksDeferred e plan (xlinks mid) (xlinks new)
-                  unsafeIOToST yield_
-                  cs <- diffKeyedChildrenDeferred e mounted plan plan' (IntSet.fromList $ fmap fst (keyedChildren new)) (keyedChildren old) (keyedChildren mid) (keyedChildren new)
-                  return old
-                    { features = fs
-                    , keyedChildren = cs
-                    }
+diffSVGKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
+diffSVGKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
+  !fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
+  diffXLinksDeferred e plan (xlinks mid) (xlinks new)
+  unsafeIOToST yield_
+  !cs <- diffKeyedChildrenDeferred e mounted plan plan' (keyedChildren old) (keyedChildren mid) (keyedChildren new)
+  return old
+    { features = fs
+    , keyedChildren = cs
+    }
 
-                diffKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
-                diffKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
-                  fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
-                  unsafeIOToST yield_
-                  cs <- diffKeyedChildrenDeferred e mounted plan plan' (IntSet.fromList $ fmap fst (keyedChildren new)) (keyedChildren old) (keyedChildren mid) (keyedChildren new)
-                  return old
-                    { features = fs
-                    , keyedChildren = cs
-                    }
+diffKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
+diffKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
+  !fs <- diffFeaturesDeferred e plan plan' (features old) (features mid) (features new)
+  unsafeIOToST yield_
+  !cs <- diffKeyedChildrenDeferred e mounted plan plan' (keyedChildren old) (keyedChildren mid) (keyedChildren new)
+  return old
+    { features = fs
+    , keyedChildren = cs
+    }
 
-                diffKeyedChildrenDeferred :: Element -> IORef [IO ()] -> Plan s -> Plan s -> IntSet -> [(Int,View)] -> [(Int,View)] -> [(Int,View)] -> ST s [(Int,View)]
-                diffKeyedChildrenDeferred (toNode -> e) mounted plan plan' keys olds mids news =
-                  case reallyUnsafePtrEquality# mids news of
-                    1# -> return olds
-                    _  ->
-                      case (mids,news) of
-                        ([],[]) -> return olds
-                        ([],_)  -> do
-                          frag <- unsafeIOToST createFrag
-                          let f = Just (toNode frag)
-                          amendPlan plan (append e frag)
-                          news' <- for news $ \(i,n) -> do
-                            new' <- unsafeIOToST $ build False mounted f n
-                            return (i,new')
-                          return news'
-                        (_,[])  -> do
-                          amendPlan plan (clearNode e)
-                          let cs = fmap (traverse_ cleanup) olds
-                          for_ cs (\c -> c `seq` amendPlan plan' c)
-                          return []
-                        _       -> do
-                          dc             <- newSTRef (e,mempty)
-                          news'          <- dKCD_slow dc mounted plan plan' keys olds mids news
-                          (_,removals)   <- readSTRef dc
-                          for_ (Map.toList removals) $ \(i,r) ->
-                            removeDeferred plan plan' r
-                          return news'
+diffKeyedChildrenDeferred :: forall s. Element -> IORef [IO ()] -> Plan s -> Plan s -> [(Int,View)] -> [(Int,View)] -> [(Int,View)] -> ST s [(Int,View)]
+diffKeyedChildrenDeferred (toNode -> e) mounted plan plan' olds !mids !news = do
+  case reallyUnsafePtrEquality# mids news of
+    1# -> return olds
+    _  ->
+      case (mids,news) of
+        ([],[]) -> return olds
 
-                dKCD_ins :: DiffCtx s -> IORef [IO ()] -> Plan s -> Int -> Int -> View -> ST s (Int,View)
-                dKCD_ins dc mounted plan i nk new = do
-                  (e,removals) <- readSTRef dc
-                  let ins i ~(Just a) = amendPlan plan (insertAt (coerce e) a i)
-                  case Map.lookup nk removals of
-                    Nothing -> do
-                      n' <- unsafeIOToST (build False mounted Nothing new)
-                      writeSTRef dc (e,removals)
-                      ins i (getHost n')
-                      return (nk,n')
-                    Just n -> do
-                      let removals' = Map.delete nk removals
-                      writeSTRef dc (e,removals')
-                      ins (i + 1) (getHost n)
-                      return (nk,n)
+        ([],_ ) -> do
+          frag <- unsafeIOToST createFrag
+          let n = Just (toNode frag)
+          news' <- for news $ \(nk,new) -> do
+              !new' <- unsafeIOToST (build False mounted n new)
+              return (nk,new')
+          amendPlan plan (append e frag)
+          return news'
 
-                dKCD_slow :: DiffCtx s -> IORef [IO ()] -> Plan s -> Plan s -> IntSet -> DiffST s [(Int,View)]
-                dKCD_slow dc mounted plan plan' keys = start 0
-                  where
-                    start _ olds _ [] = do
-                      for_ olds $ \(ok,o) -> modifySTRef' dc $ \(e,removals) ->
-                        let !removals' = Map.insert ok o removals
-                        in (e,removals')
-                      return []
+        (_,[]) -> do
+          amendPlan plan (clearNode e)
+          for_ (fmap (cleanup . snd) olds) (amendPlan plan')
+          return []
 
-                    start _ [] _ news = do
-                      for news $ \(i,new) -> do
-                        (e,removals) <- readSTRef dc
-                        case Map.lookup i removals of
-                          Nothing -> do
-                            new' <- unsafeIOToST (build False mounted Nothing new)
-                            for (getHost new') $ amendPlan plan . append e
-                            return (i,new')
-                          Just r  -> do
-                            let removals' = Map.delete i removals
-                            writeSTRef dc (e,removals')
-                            for (getHost r) $ amendPlan plan . append e
-                            return (i,r)
+        _ -> do
+          dc       <- newSTRef mempty
+          !news'   <- dKCD_slow dc olds mids news
+          removals <- readSTRef dc
+          for_ removals (removeDeferred plan plan' . fst)
+          return news'
 
-                    start i ~olds@((ok,old):olds') ~mids@((mk,mid):mids') ~news@((nk,new):news')
-                      | mk == nk = do
-                        new' <- diffDeferred mounted plan plan' old mid new
-                        news'' <- start (i + 1) olds' mids' news'
-                        return ((nk,new'):news'')
-                      | otherwise = go i olds mids news
+  where
 
-                    go i [o@(ok,old)] ~[m@(mk,mid)] (n0@(nk0,new0):n1@(nk1,new1):ns) = do
-                      if mk == nk0
+    dKCD_slow :: Removals s -> DiffST s [(Int,View)]
+    dKCD_slow dc = check 0
+      where
+        check !i olds !mids !news = do
+          case reallyUnsafePtrEquality# mids news of
+            1# -> return olds
+            _  -> start olds mids news
+          where
+            start ((ok,old):olds') ((mk,mid):mids') ((nk,new):news')
+              | mk == nk = do
+                !new' <- diffDeferred mounted plan plan' old mid new
+                news'' <- check (i + 1) olds' mids' news'
+                return ((nk,new'):news'')
+              | otherwise =
+                go olds mids news
+              where
+                go os0@(o0@(ok0,old0):os1@(o1@(ok1,old1):os2)) ms0@(m0@(mk0,mid0):ms1@(m1@(mk1,mid1):ms2)) ns@(n0@(nk0,new0):ns1@(n1@(nk1,new1):ns2))
+                  | mk0 == nk0 = do
+                      n <- dKCD_helper o0 m0 n0
+                      ns <- check (i + 1) os1 ms1 ns1
+                      return (n:ns)
+
+                  | mk0 == nk1 && mk1 == nk0 = do
+                      -- swap mk0 mk1
+                      let ins (Just b) = amendPlan plan (insertAt (coerce e) b i)
+                      ins (getHost old1)
+                      ns <- check (i + 2) os2 ms2 ns2
+                      return (o1:o0:ns)
+
+                  | mk0 == nk1 = do
+                      -- insert nk0
+                      n0 <- dKCD_ins nk0 new0
+                      ns <- check (i + 1) os0 ms0 ns1
+                      return (n0:ns)
+
+                  | mk1 == nk0 = do
+                      -- delete m0
+                      modifySTRef' dc (IntMap.insert ok0 (old0,mid0))
+                      check i os1 ms1 ns
+
+                  | otherwise = do
+                      -- remove mk0, insert nk0, diff mk1 nk1 or recurse
+                      modifySTRef' dc (IntMap.insert ok0 (old0,mid0))
+                      check (i + 1) os1 ms1 ns
+
+                go [o@(ok,old)] [m@(mk,mid)] (n0@(nk0,new0):n1@(nk1,new1):ns) =
+                  if mk == nk0
+                    then do
+                      n' <- dKCD_helper o m n0
+                      ns' <- check (i + 1) [] [] (n1:ns)
+                      return (n':ns')
+                    else
+                      if mk == nk1
                         then do
-                          n' <- dKCD_helper dc mounted plan plan' o m n0
-                          ns' <- go (i + 1) [] [] (n1:ns)
-                          return (n':ns')
-                        else
-                          if mk == nk1
-                            then do
-                              n'  <- dKCD_ins dc mounted plan i nk0 new0
-                              ns' <- go (i + 1) [o] [m] (n1:ns)
-                              return (n':ns')
-                            else do
-                              modifySTRef' dc $ \(e,removals) ->
-                                let !removals' = Map.insert mk old removals
-                                in (e,removals')
-                              n' <- dKCD_ins dc mounted plan i nk0 new0
-                              ns' <- go (i + 1) [] [] (n1:ns)
-                              return (n':ns')
-
-                    go i [o@(ok,old)] ~[m@(mk,mid)] ~[n@(nk,new)] = do
-                      if mk == nk
-                        then do
-                          n' <- dKCD_helper dc mounted plan plan' o m n
-                          return [n']
-                        else do
-                          modifySTRef' dc $ \(e,removals) ->
-                            let !removals' = Map.insert mk old removals
-                            in (e,removals')
-                          n' <- dKCD_ins dc mounted plan i nk new
-                          return [n']
-
-                    go i ~(o@(ok,old):os) ~(m@(mk,mid):ms) ns@[n@(nk,new)] = do
-                      if mk == nk
-                        then do
-                          n' <- dKCD_helper dc mounted plan plan' o m n
-                          ns' <- start (i + 1) os ms []
+                          n'  <- dKCD_ins nk0 new0
+                          ns' <- check (i + 1) [o] [m] (n1:ns)
                           return (n':ns')
                         else do
-                          modifySTRef' dc $ \(e,removals) ->
-                            let !removals' = Map.insert mk old removals
-                            in (e,removals')
-                          start i os ms ns
+                          modifySTRef' dc (IntMap.insert ok (old,mid))
+                          n' <- dKCD_ins nk0 new0
+                          ns' <- check (i + 1) [] [] (n1:ns)
+                          return (n':ns')
 
-                    go i os0@(o0@(ok0,old0):os1@(o1@(ok1,old1):os2)) ~ms0@(m0@(mk0,mid0):ms1@(m1@(mk1,mid1):ms2)) ~ns@(n0@(nk0,new0):ns1@(n1@(nk1,new1):ns2))
-                      | mk0 == nk0 = do
-                          n <- dKCD_helper dc mounted plan plan' o0 m0 n0
-                          case reallyUnsafePtrEquality# ms1 ns1 of
-                            1# -> return (n:os1)
-                            _  -> do
-                              ns <- go (i + 1) os1 ms1 ns1
-                              return (n:ns)
+                go [o@(ok,old)] [m@(mk,mid)] [n@(nk,new)] =
+                  if mk == nk
+                    then do
+                      n' <- dKCD_helper o m n
+                      return [n']
+                    else do
+                      modifySTRef' dc (IntMap.insert ok (old,mid))
+                      n' <- dKCD_ins nk new
+                      return [n']
 
-                      | mk0 == nk1 && mk1 == nk0 = do
-                          -- swap mk0 mk1
-                          (e,_) <- readSTRef dc
-                          let ins ~(Just b) = amendPlan plan (insertAt (coerce e) b i)
-                          ins (getHost old1)
-                          case reallyUnsafePtrEquality# ms2 ns2 of
-                            1# -> return (o1:o0:os2)
-                            _  -> do
-                              ns <- start (i + 2) os2 ms2 ns2
-                              return (o1:o0:ns)
+                go (o@(ok,old):os) (m@(mk,mid):ms) ns@[n@(nk,new)] =
+                  if mk == nk
+                    then do
+                      n' <- dKCD_helper o m n
+                      ns' <- check (i + 1) os ms []
+                      return (n':ns')
+                    else do
+                      modifySTRef' dc (IntMap.insert ok (old,mid))
+                      check i os ms ns
 
-                      | mk0 == nk1 = do
-                          -- insert nk0
-                          n0 <- dKCD_ins dc mounted plan i nk0 new0
-                          case reallyUnsafePtrEquality# ms0 ns1 of
-                            1# -> return (n0:os0)
-                            _  -> do
-                              ns <- go (i + 1) os0 ms0 ns1
-                              return (n0:ns)
-
-                      | mk1 == nk0 = do
-                          -- delete mk0
-                          modifySTRef' dc $ \(e,removals) ->
-                            let !removals' = Map.insert mk0 old0 removals
-                            in (e,removals')
-                          case reallyUnsafePtrEquality# ms1 ns of
-                            1# -> return os1
-                            _  -> go i os1 ms1 ns
-
-                      | not (IntSet.member mk0 keys) = do
-                          n <- dKCD_helper dc mounted plan plan' o0 m0 n0
-                          case reallyUnsafePtrEquality# ms1 ns1 of
-                            1# -> return (n:os1)
-                            _  -> do
-                              ns <- go (i + 1) os1 ms1 ns1
-                              return (n:ns)
-
-                      | otherwise = do
-                          -- remove mk0, insert nk0, diff mk1 nk1 or recurse
-                          modifySTRef' dc $ \(e,removals) ->
-                            let !removals' = Map.insert mk0 old0 removals
-                            in (e,removals')
-                          n0 <- dKCD_ins dc mounted plan i nk0 new0
-                          if mk1 == nk1
-                            then do
-                              n1 <- dKCD_helper dc mounted plan plan' o1 m1 n1
-                              case reallyUnsafePtrEquality# ms2 ns2 of
-                                1# -> return (n0:n1:os2)
-                                _  -> do
-                                  ns <- start (i + 2) os2 ms2 ns2
-                                  return (n0:n1:ns)
-                            else
-                              case reallyUnsafePtrEquality# ms1 ns1 of
-                                1# -> return (n0:os1)
-                                _  -> do
-                                  ns <- go (i + 1) os1 ms1 ns1
-                                  return (n0:ns)
-
-
-                dKCD_helper :: DiffCtx s -> IORef [IO ()] -> Plan s -> Plan s -> (Int,View) -> (Int,View) -> (Int,View) -> ST s (Int,View)
-                dKCD_helper dc mounted plan plan' (ok,old) (mk,mid) (nk,new) = do
-                  new' <- diffDeferred mounted plan plan' old mid new
+                dKCD_helper :: (Int,View) -> (Int,View) -> (Int,View) -> ST s (Int,View)
+                dKCD_helper (_,old) (_,mid) (nk,new) = do
+                  !new' <- diffDeferred mounted plan plan' old mid new
                   return (nk,new')
+
+                dKCD_ins :: Int -> View -> ST s (Int,View)
+                dKCD_ins nk new = do
+                  removals <- readSTRef dc
+                  let ins (Just a) = amendPlan plan (insertAt (coerce e) a i)
+                  case IntMap.lookup nk removals of
+                    Nothing -> do
+                      !n' <- unsafeIOToST (build False mounted Nothing new)
+                      ins (getHost n')
+                      return (nk,n')
+                    Just (o,m) -> do
+                      writeSTRef dc $ IntMap.delete nk removals
+                      !new' <- diffDeferred mounted plan plan' o m new
+                      ins (getHost new')
+                      return (nk,new')
+
+            start olds mids [] = do
+              for_ (zip olds mids) $ \((ok,o),(_,m)) -> modifySTRef' dc (IntMap.insert ok (o,m))
+              return []
+
+            start [] _ news = do
+              for news $ \(nk,new) -> do
+                removals <- readSTRef dc
+                case IntMap.lookup nk removals of
+                  Nothing -> do
+                    !new' <- unsafeIOToST $ build False mounted Nothing new
+                    for_ (getHost new') (amendPlan plan . append e)
+                    return (nk,new')
+
+                  Just (old,mid) -> do
+                    writeSTRef dc (IntMap.delete nk removals)
+                    !new' <- diffDeferred mounted plan plan' old mid new
+                    for_ (getHost new) (amendPlan plan . append e)
+                    return (nk,new')
+
