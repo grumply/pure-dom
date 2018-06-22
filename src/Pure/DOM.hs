@@ -226,7 +226,7 @@ build first mtd = go
         setClasses :: Element -> Set Txt -> IO ()
         setClasses e cs
           | Set.null cs = return ()
-          | otherwise   = setProperty e "className" $ Txt.intercalate " " $ Set.toList $ Set.delete "" cs
+          | otherwise   = setAttribute e "class" $ Txt.intercalate " " $ Set.toList $ Set.delete "" cs
 
         setStyles :: Element -> Map Txt Txt -> IO ()
         setStyles e = traverse_ (uncurry (setStyle e)) . Map.toList
