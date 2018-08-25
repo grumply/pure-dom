@@ -495,9 +495,14 @@ diffDeferred mounted plan plan' old mid new =
               _ -> replace
 
           (SomeView t m,SomeView t' n) ->
-            case reallyUnsafePtrEquality# m (unsafeCoerce n) of
-              1# -> return old
-              _  ->
+            if (__pure_identity m) == (__pure_identity n)
+              then
+                -- we know these types share a Pure instance, so we can safely unsafeCoerce
+                case reallyUnsafePtrEquality# m (unsafeCoerce n) of
+                  1# -> return old
+                  _  -> diffDeferred mounted plan plan' old (view m) (view n)
+              else
+                -- potentially slow TypeRep equality test; we hit this path with -O0 and truly different types.
                 case reallyUnsafePtrEquality# t t' of
                   0# | t /= t' -> replace
                   _            -> diffDeferred mounted plan plan' old (view m) (view n)
