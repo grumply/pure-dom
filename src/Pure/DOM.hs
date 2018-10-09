@@ -55,6 +55,7 @@ import Pure.Data.Lifted
   -- node insertion
   ,append
   ,insertAt
+  ,insertBefore
   ,setInnerHTML
 
   -- node replacement
@@ -890,8 +891,8 @@ diffKeyedChildrenDeferred (toNode -> e) mounted plan plan' olds !mids !news = do
 
                   | mk0 == nk1 && mk1 == nk0 = do
                       -- swap mk0 mk1
-                      let ins (Just b) = amendPlan plan (insertAt (coerce e) b i)
-                      ins (getHost old1)
+                      let ins (Just _0) (Just _1) = amendPlan plan (insertBefore _1 _0)
+                      ins (getHost old0) (getHost old1)
                       ns <- check (i + 2) os2 ms2 ns2
                       return (o1:o0:ns)
 
