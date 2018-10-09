@@ -902,15 +902,10 @@ diffKeyedChildrenDeferred (toNode -> e) mounted plan plan' olds !mids !news = do
                       ns <- check (i + 1) os0 ms0 ns1
                       return (n0:ns)
 
-                  | mk1 == nk0 = do
+                  | otherwise = do
                       -- delete m0
                       modifySTRef' dc (IntMap.insert ok0 (old0,mid0))
                       check i os1 ms1 ns
-
-                  | otherwise = do
-                      -- remove mk0, insert nk0, diff mk1 nk1 or recurse
-                      modifySTRef' dc (IntMap.insert ok0 (old0,mid0))
-                      check (i + 1) os1 ms1 ns
 
                 go [o@(ok,old)] [m@(mk,mid)] (n0@(nk0,new0):n1@(nk1,new1):ns) =
                   if mk == nk0
