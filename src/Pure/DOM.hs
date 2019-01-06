@@ -455,21 +455,17 @@ diffDeferred mounted plan plan' old mid new =
                       _  -> diffDeferred mounted plan plan' old (view (f a)) (view (f' a'))
               _  -> replace
 
-          (ComponentView t p _ v,ComponentView t' p' _ v')
-            | sameTypeWitness t t' -> do
-              unsafeIOToST $ print "same component witness"
-              case reallyUnsafePtrEquality# p (unsafeCoerce p') of
-                1# -> return old
-                _  -> do
-                  case old of
-                    ComponentView _ _ ~(Just r0) _ -> do
-                      let r = unsafeCoerce r0
-                      unsafeIOToST $ setProps r p'
-                      return (ComponentView t' p' (Just r) v')
-            | otherwise -> unsafeIOToST $ do
-              case old of
-                ComponentView _ _ ~(Just r0) _ -> do
-                  print "Different component witness"
+          (ComponentView t p _ v,ComponentView t' p' _ v') ->
+            case old of
+              ComponentView _ _ ~(Just r0) _
+                | sameTypeWitness t t' ->
+                  case reallyUnsafePtrEquality# p (unsafeCoerce p') of
+                    1# -> return old
+                    _  -> do
+                          let r = unsafeCoerce r0
+                          unsafeIOToST $ setProps r p'
+                          return (ComponentView t' p' (Just r) v')
+                | otherwise -> unsafeIOToST $ do
                   mtd <- newIORef []
                   !new' <- build False mtd Nothing new
                   queueComponentUpdate r0 (Unmount (Just new') (readIORef mtd >>= runPlan))
