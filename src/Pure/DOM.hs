@@ -32,7 +32,7 @@ import qualified Data.Set as Set (fromList,toList,insert,delete,null)
 import qualified Data.IntSet as IntSet (fromList,member)
 
 -- from pure-core
-import Pure.Data.View (Pure(..),View(..),Features(..),Listener(..),Lifecycle(..),Comp(..),Target(..),getHost,setProps,queueComponentUpdate,Ref(..),ComponentPatch(..),sameTypeWitness)
+import Pure.Data.View (Pure(..),View(..),Features(..),Listener(..),Lifecycle(..),Comp(..),Target(..),getHost,setProps,queueComponentUpdate,Ref(..),ComponentPatch(..),sameTypeWitness,asProxyOf)
 
 -- from pure-lifted
 import Pure.Animation
@@ -156,7 +156,7 @@ inject host v = do
 build :: Bool -> IORef [IO ()] -> Maybe Node -> View -> IO View
 build first mtd = go
   where
-    go mparent (SomeView _ r) = go mparent (view r)
+    go mparent (SomeView r) = go mparent (view r)
     go mparent v@ComponentView{} = buildComponent mtd mparent v
     go mparent tv@(TextView{}) = do
       tn <- createText (content tv)
@@ -494,17 +494,12 @@ diffDeferred mounted plan plan' old mid new =
                   _  -> replace
               _ -> replace
 
-          (SomeView t m,SomeView t' n) ->
-            if sameTypeWitness t t'
-              then do
-                unsafeIOToST $ print "same pure witness"
-                -- we know these types share a Pure instance, so we can safely unsafeCoerce
-                case reallyUnsafePtrEquality# m (unsafeCoerce n) of
-                  1# -> return old
-                  _  -> diffDeferred mounted plan plan' old (view m) (view n)
-              else do
-                unsafeIOToST $ print "different pure witness"
-                replace
+          (SomeView m,SomeView n)
+            | sameTypeWitness (__pure_witness (asProxyOf m)) (__pure_witness (asProxyOf n)) ->
+              case reallyUnsafePtrEquality# m (unsafeCoerce n) of
+                1# -> return old
+                _  -> diffDeferred mounted plan plan' old (view m) (view n)
+            | otherwise -> replace
 
           (SVGView{},SVGView{}) ->
             case reallyUnsafePtrEquality# (tag mid) (tag new) of
