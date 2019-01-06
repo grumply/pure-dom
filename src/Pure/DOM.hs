@@ -32,7 +32,7 @@ import qualified Data.Set as Set (fromList,toList,insert,delete,null)
 import qualified Data.IntSet as IntSet (fromList,member)
 
 -- from pure-core
-import Pure.Data.View (Pure(..),View(..),Features(..),Listener(..),Lifecycle(..),Comp(..),Target(..),getHost,setProps,queueComponentUpdate,Ref(..),ComponentPatch(..))
+import Pure.Data.View (Pure(..),View(..),Features(..),Listener(..),Lifecycle(..),Comp(..),Target(..),getHost,setProps,queueComponentUpdate,Ref(..),ComponentPatch(..),sameTypeWitness)
 
 -- from pure-lifted
 import Pure.Animation
@@ -273,13 +273,13 @@ build first mtd = go
           modifyIORef' mtd ((w (toNode e)):)
           return (HostRef w)
 
-buildComponent mtd mparent (ComponentView name props _ comp) = do
+buildComponent mtd mparent (ComponentView witness props _ comp) = do
   stq    <- newIORef . Just =<< newQueue
   props_ <- newIORef props
   state_ <- newIORef undefined
   live_  <- newIORef undefined
   let c = comp cr
-      cr = Ref name live_ props_ state_ c stq
+      cr = Ref live_ props_ state_ c stq
   state1 <- construct c
   writeIORef state_ state1
   state2 <- mount c state1
@@ -289,7 +289,7 @@ buildComponent mtd mparent (ComponentView name props _ comp) = do
   writeIORef live_ live
   modifyIORef' mtd ((mounted c):)
   addIdleWork (newComponentThread cr new live props state2)
-  return $ ComponentView name props (Just cr) comp
+  return $ ComponentView witness props (Just cr) comp
   where
     newComponentThread ref@Ref { crComponent = Comp {..}, ..} view0 live0 props0 state0 = do
         st <- newIORef (view0,live0,props0,state0,props0,state0)
@@ -455,22 +455,25 @@ diffDeferred mounted plan plan' old mid new =
                       _  -> diffDeferred mounted plan plan' old (view (f a)) (view (f' a'))
               _  -> replace
 
-          (ComponentView t p _ v,ComponentView t' p' _ v') -> unsafeIOToST $
-            case reallyUnsafePtrEquality# p (unsafeCoerce p') of
-              1# -> return old
-              _  ->
-                      case old of
-                        ComponentView _ _ ~(Just r0) _ ->
-                          case reallyUnsafePtrEquality# t t' of
-                            0# | t /= t' -> do
-                              mtd <- newIORef []
-                              !new' <- build False mtd Nothing new
-                              queueComponentUpdate r0 (Unmount (Just new') (readIORef mtd >>= runPlan))
-                              return new'
-                            _ -> do
-                              let r = unsafeCoerce r0
-                              setProps r p'
-                              return (ComponentView t' p' (Just r) v')
+          (ComponentView t p _ v,ComponentView t' p' _ v')
+            | sameTypeWitness t t' -> do
+              unsafeIOToST $ print "same component witness"
+              case reallyUnsafePtrEquality# p (unsafeCoerce p') of
+                1# -> return old
+                _  -> do
+                  case old of
+                    ComponentView _ _ ~(Just r0) _ -> do
+                      let r = unsafeCoerce r0
+                      unsafeIOToST $ setProps r p'
+                      return (ComponentView t' p' (Just r) v')
+            | otherwise -> unsafeIOToST $ do
+              case old of
+                ComponentView _ _ ~(Just r0) _ -> do
+                  print "Different component witness"
+                  mtd <- newIORef []
+                  !new' <- build False mtd Nothing new
+                  queueComponentUpdate r0 (Unmount (Just new') (readIORef mtd >>= runPlan))
+                  return new'
 
           (HTMLView{},HTMLView{}) ->
             case reallyUnsafePtrEquality# (tag mid) (tag new) of
@@ -496,17 +499,16 @@ diffDeferred mounted plan plan' old mid new =
               _ -> replace
 
           (SomeView t m,SomeView t' n) ->
-            if (__pure_identity m) == (__pure_identity n)
-              then
+            if sameTypeWitness t t'
+              then do
+                unsafeIOToST $ print "same pure witness"
                 -- we know these types share a Pure instance, so we can safely unsafeCoerce
                 case reallyUnsafePtrEquality# m (unsafeCoerce n) of
                   1# -> return old
                   _  -> diffDeferred mounted plan plan' old (view m) (view n)
-              else
-                -- potentially slow TypeRep equality test; we hit this path with -O0 and truly different types.
-                case reallyUnsafePtrEquality# t t' of
-                  0# | t /= t' -> replace
-                  _            -> diffDeferred mounted plan plan' old (view m) (view n)
+              else do
+                unsafeIOToST $ print "different pure witness"
+                replace
 
           (SVGView{},SVGView{}) ->
             case reallyUnsafePtrEquality# (tag mid) (tag new) of
