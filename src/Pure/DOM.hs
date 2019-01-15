@@ -786,44 +786,6 @@ diffChildrenDeferred (toNode -> e) mounted plan plan' olds mids news =
       amendPlan plan (append e frag)
       return news'
 
-  -- where
-  --   cleanupCheck :: DiffST s [View]
-  --   cleanupCheck olds mids news = do
-  --     case reallyUnsafePtrEquality# mids news of
-  --       1# -> return olds
-  --       _  -> if List.null news
-  --               then do
-  --                 amendPlan plan (clearNode e)
-  --                 let cs = fmap cleanup olds
-  --                 for_ cs (amendPlan plan')
-  --                 return []
-  --               else go olds mids news
-
-  --   start :: DiffST s [View]
-  --   start olds mids news =
-  --     case reallyUnsafePtrEquality# mids news of
-  --       1# -> return olds
-  --       _  -> go olds mids news
-
-  --   go :: DiffST s [View]
-  --   go olds _ [] = do
-  --     !_ <- for_ olds (removeDeferred plan plan')
-  --     return []
-
-  --   go [] _ news = do
-  --     frag <- unsafeIOToST createFrag
-  --     let n = Just (toNode frag)
-  --     !news' <- for news $ \new -> do
-  --       !new' <- unsafeIOToST (build False mounted n new)
-  --       return new'
-  --     amendPlan plan (append e frag)
-  --     return news'
-
-  --   go (old:olds) (mid:mids) (new:news) = do
-  --     !new'  <- diffDeferred mounted plan plan' old mid new
-  --     !news' <- start olds mids news
-  --     return (new' : news')
-
 removeManyDeferred :: Plan s -> Plan s -> [View] -> ST s ()
 removeManyDeferred plan plan' vs = do
   amendPlan plan  (for_ vs (traverse_ removeNodeMaybe . getHost))
