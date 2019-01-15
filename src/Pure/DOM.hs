@@ -23,11 +23,9 @@ import Prelude hiding (head)
 
 -- from containers
 import Data.Map.Lazy (Map)
-import Data.IntMap (IntMap)
 import Data.Set (Set)
 import Data.IntSet (IntSet)
 import qualified Data.Map.Strict as Map (fromList,toList,insert,difference,keys,differenceWith)
-import qualified Data.IntMap.Strict as IntMap (fromList,toList,insert,lookup,delete)
 import qualified Data.Set as Set (fromList,toList,insert,delete,null)
 import qualified Data.IntSet as IntSet (fromList,member)
 
@@ -113,7 +111,7 @@ import qualified Pure.Data.Txt as Txt (intercalate)
 
 type Plan s = STRef s [IO ()]
 type DiffST s a = a -> a -> a -> ST s a
-type Removals s = STRef s (IntMap (View,View))
+type Removals s = STRef s [View]
 
 {-# INLINE newPlan #-}
 newPlan :: ST s (Plan s)
@@ -437,7 +435,6 @@ cleanup _ = return ()
 
 diffDeferred :: forall s. IORef [IO ()] -> Plan s -> Plan s -> View -> View -> View -> ST s View
 diffDeferred mounted plan plan' old mid new =
-
   case reallyUnsafePtrEquality# mid new of
     1# -> return old
 
@@ -747,29 +744,37 @@ unsafeContains (x : xs) a =
 --     add    = Map.mapWithKey (\nm val -> setStyle e nm val)
 
 diffChildrenDeferred :: forall s. Element -> IORef [IO ()] -> Plan s -> Plan s -> DiffST s [View]
-diffChildrenDeferred (toNode -> e) mounted plan plan' = cleanupCheck
+diffChildrenDeferred (toNode -> e) mounted plan plan' olds mids news =
+  case reallyUnsafePtrEquality# mids news of
+    1# -> return olds
+    _  ->
+      case (mids,news) of
+        ([],[]) -> return olds
+
+        -- 0 1+
+        ([],_ ) -> do
+          frag <- unsafeIOToST createFrag
+          let n = Just (toNode frag)
+          !news' <- for news (unsafeIOToST . build False mounted n)
+          amendPlan plan (append e frag)
+          return news'
+
+        -- 1+ 0
+        (_,[]) -> do
+          amendPlan plan (clearNode e)
+          amendPlan plan' (for_ olds cleanup)
+          return []
+
+        -- 1+ 1+
+        _ -> go olds mids news
   where
-    cleanupCheck :: DiffST s [View]
-    cleanupCheck olds mids news = do
-      case reallyUnsafePtrEquality# mids news of
-        1# -> return olds
-        _  -> if List.null news
-                then do
-                  amendPlan plan (clearNode e)
-                  let cs = fmap cleanup olds
-                  for_ cs (amendPlan plan')
-                  return []
-                else go olds mids news
+    go (old:olds) (mid:mids) (new:news) = do
+      !new'  <- diffDeferred mounted plan plan' old mid new
+      !news' <- go olds mids news
+      return (new' : news')
 
-    start :: DiffST s [View]
-    start olds mids news =
-      case reallyUnsafePtrEquality# mids news of
-        1# -> return olds
-        _  -> go olds mids news
-
-    go :: DiffST s [View]
     go olds _ [] = do
-      !_ <- for_ olds (removeDeferred plan plan')
+      removeManyDeferred plan plan' olds
       return []
 
     go [] _ news = do
@@ -781,10 +786,48 @@ diffChildrenDeferred (toNode -> e) mounted plan plan' = cleanupCheck
       amendPlan plan (append e frag)
       return news'
 
-    go (old:olds) (mid:mids) (new:news) = do
-      !new'  <- diffDeferred mounted plan plan' old mid new
-      !news' <- start olds mids news
-      return (new' : news')
+  -- where
+  --   cleanupCheck :: DiffST s [View]
+  --   cleanupCheck olds mids news = do
+  --     case reallyUnsafePtrEquality# mids news of
+  --       1# -> return olds
+  --       _  -> if List.null news
+  --               then do
+  --                 amendPlan plan (clearNode e)
+  --                 let cs = fmap cleanup olds
+  --                 for_ cs (amendPlan plan')
+  --                 return []
+  --               else go olds mids news
+
+  --   start :: DiffST s [View]
+  --   start olds mids news =
+  --     case reallyUnsafePtrEquality# mids news of
+  --       1# -> return olds
+  --       _  -> go olds mids news
+
+  --   go :: DiffST s [View]
+  --   go olds _ [] = do
+  --     !_ <- for_ olds (removeDeferred plan plan')
+  --     return []
+
+  --   go [] _ news = do
+  --     frag <- unsafeIOToST createFrag
+  --     let n = Just (toNode frag)
+  --     !news' <- for news $ \new -> do
+  --       !new' <- unsafeIOToST (build False mounted n new)
+  --       return new'
+  --     amendPlan plan (append e frag)
+  --     return news'
+
+  --   go (old:olds) (mid:mids) (new:news) = do
+  --     !new'  <- diffDeferred mounted plan plan' old mid new
+  --     !news' <- start olds mids news
+  --     return (new' : news')
+
+removeManyDeferred :: Plan s -> Plan s -> [View] -> ST s ()
+removeManyDeferred plan plan' vs = do
+  amendPlan plan  (for_ vs (traverse_ removeNodeMaybe . getHost))
+  amendPlan plan' (for_ vs cleanup)
 
 removeDeferred :: Plan s -> Plan s -> View -> ST s ()
 removeDeferred plan plan' v = do
@@ -829,14 +872,24 @@ diffKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !ne
     , keyedChildren = cs
     }
 
+-- Keyed diffing works very much like elm's virtual-dom with short-cut in the case that the children are unchanged.
+-- We use a fragment in the case of a transition from 0 children to some (n /= 0) children so that the animation frame
+-- only has to do one node append. We use `clearNode` for quick empty with deferred cleanup.
+--
+-- Note: We try to do as little work as possible in the animation frame, so lists of the same action are collapsed into a single action.
+--       See, for example, 0 1+, 1+ 0, 0 0+, and cleanup
+--       Remaining cases are:
+--          swap where three actions are added to the plan rather than one
+--          2+ 2+/insert nk0 where insert is immediately followed by diff
 diffKeyedChildrenDeferred :: forall s. Element -> IORef [IO ()] -> Plan s -> Plan s -> [(Int,View)] -> [(Int,View)] -> [(Int,View)] -> ST s [(Int,View)]
-diffKeyedChildrenDeferred (toNode -> e) mounted plan plan' olds !mids !news = do
+diffKeyedChildrenDeferred (toNode -> e) mounted plan plan' olds mids !news = do
   case reallyUnsafePtrEquality# mids news of
     1# -> return olds
     _  ->
       case (mids,news) of
         ([],[]) -> return olds
 
+        -- 0 1+
         ([],_ ) -> do
           frag <- unsafeIOToST createFrag
           let n = Just (toNode frag)
@@ -846,134 +899,114 @@ diffKeyedChildrenDeferred (toNode -> e) mounted plan plan' olds !mids !news = do
           amendPlan plan (append e frag)
           return news'
 
+        -- 1+ 0
         (_,[]) -> do
           amendPlan plan (clearNode e)
-          for_ (fmap (cleanup . snd) olds) (amendPlan plan')
+          amendPlan plan' (for_ (fmap snd olds) cleanup)
           return []
 
+        -- 1+ 1+
         _ -> do
           dc       <- newSTRef mempty
           !news'   <- dKCD_slow dc olds mids news
           removals <- readSTRef dc
-          for_ removals (removeDeferred plan plan' . fst)
+
+          -- cleanup
+          -- remove them in reverse order they were added since they were
+          -- diffed beginning to end and added with (_:) rather than (++[_])
+          removeManyDeferred plan plan' (reverse removals)
+
           return news'
 
   where
-
     dKCD_slow :: Removals s -> DiffST s [(Int,View)]
-    dKCD_slow dc = check 0
+    dKCD_slow dc = go 0
       where
-        check !i olds !mids !news = do
-          case reallyUnsafePtrEquality# mids news of
-            1# -> return olds
-            _  -> start olds mids news
-          where
-            start ((ok,old):olds') ((mk,mid):mids') ((nk,new):news')
-              | mk == nk = do
-                !new' <- diffDeferred mounted plan plan' old mid new
-                news'' <- check (i + 1) olds' mids' news'
-                return ((nk,new'):news'')
-              | otherwise =
-                go olds mids news
-              where
-                go os0@(o0@(ok0,old0):os1@(o1@(ok1,old1):os2)) ms0@(m0@(mk0,mid0):ms1@(m1@(mk1,mid1):ms2)) ns@(n0@(nk0,new0):ns1@(n1@(nk1,new1):ns2))
-                  | mk0 == nk0 = do
-                      n <- dKCD_helper o0 m0 n0
-                      ns <- check (i + 1) os1 ms1 ns1
-                      return (n:ns)
+        -- Invariant: we can always infer the shape of `mids` from the shape of `olds`; mids should always be an irrefutable pattern
 
-                  | mk0 == nk1 && mk1 == nk0 = do
-                      -- swap mk0 mk1
-                      let ins (Just _0) (Just _1) = amendPlan plan (insertBefore _1 _0)
-                      ins (getHost old0) (getHost old1)
-                      ns <- check (i + 2) os2 ms2 ns2
-                      return (o1:o0:ns)
+        -- 2+ 2+
+        go !i (o0@(ok0,old0):os1@(o1@(ok1,old1):os2)) ~(m0@(mk0,mid0):ms1@(m1@(mk1,mid1):ms2)) ns@(n0@(nk0,new0):ns1@(n1@(nk1,new1):ns2))
+          | mk0 == nk0 = do
+              -- diff mk0 and nk0
+              n  <- dKCD_helper o0 m0 n0
+              ns <- go (i + 1) os1 ms1 ns1
+              return (n:ns)
 
-                  | mk0 == nk1 = do
-                      -- insert nk0
-                      n0 <- dKCD_ins nk0 new0
-                      ns <- check (i + 1) os0 ms0 ns1
-                      return (n0:ns)
+          | mk0 == nk1 && mk1 == nk0 = do
+              -- swap mk0 mk1 and diff them in turn
+              let ins (Just _0) (Just _1) = amendPlan plan (insertBefore _1 _0)
+              ins (getHost old0) (getHost old1)
+              n0' <- dKCD_helper o1 m1 n0
+              n1' <- dKCD_helper o0 m0 n1
+              ns  <- go (i + 2) os2 ms2 ns2
+              return (n0':n1':ns)
 
-                  | otherwise = do
-                      -- delete m0
-                      modifySTRef' dc (IntMap.insert ok0 (old0,mid0))
-                      check i os1 ms1 ns
+          | mk0 == nk1 = do
+              -- insert nk0
+              n0' <- dKCD_ins i nk0 new0
+              n1' <- dKCD_helper o0 m0 n1
+              ns  <- go (i + 2) os1 ms1 ns2
+              return (n0':n1':ns)
 
-                go [o@(ok,old)] [m@(mk,mid)] (n0@(nk0,new0):n1@(nk1,new1):ns) =
-                  if mk == nk0
-                    then do
-                      n' <- dKCD_helper o m n0
-                      ns' <- check (i + 1) [] [] (n1:ns)
-                      return (n':ns')
-                    else
-                      if mk == nk1
-                        then do
-                          n'  <- dKCD_ins nk0 new0
-                          ns' <- check (i + 1) [o] [m] (n1:ns)
-                          return (n':ns')
-                        else do
-                          modifySTRef' dc (IntMap.insert ok (old,mid))
-                          n' <- dKCD_ins nk0 new0
-                          ns' <- check (i + 1) [] [] (n1:ns)
-                          return (n':ns')
+          | otherwise = do
+              -- delete m0
+              modifySTRef' dc (old0:)
+              go (i + 1) os1 ms1 ns
 
-                go [o@(ok,old)] [m@(mk,mid)] [n@(nk,new)] =
-                  if mk == nk
-                    then do
-                      n' <- dKCD_helper o m n
-                      return [n']
-                    else do
-                      modifySTRef' dc (IntMap.insert ok (old,mid))
-                      n' <- dKCD_ins nk new
-                      return [n']
+        -- 1 2+
+        go i (os@[o@(ok,old)]) ~(ms@[m@(mk,mid)]) new@(n0@(nk0,new0):ns@((nk1,new1):_))
+          | mk == nk0 = do
+              -- diff mk and nk0
+              n'  <- dKCD_helper o m n0
+              ns' <- go (i + 1) [] [] ns
+              return (n':ns')
+          | mk == nk1 = do
+              -- insert nk0
+              n'  <- dKCD_ins i nk0 new0
+              ns' <- go (i + 1) os ms ns
+              return (n':ns')
+          | otherwise = do
+              -- delete mk
+              modifySTRef' dc (old:)
+              go (i + 1) [] [] new
 
-                go (o@(ok,old):os) (m@(mk,mid):ms) ns@[n@(nk,new)] =
-                  if mk == nk
-                    then do
-                      n' <- dKCD_helper o m n
-                      ns' <- check (i + 1) os ms []
-                      return (n':ns')
-                    else do
-                      modifySTRef' dc (IntMap.insert ok (old,mid))
-                      check i os ms ns
+        -- 1+ 1
+        go i (o@(ok,old):os) ~(m@(mk,mid):ms) (ns@[n@(nk,new)])
+          | mk == nk = do
+              -- diff mk and nk
+              n' <- dKCD_helper o m n
+              ns' <- go (i + 1) os ms []
+              return (n':ns')
+          | otherwise = do
+              -- delete mk
+              modifySTRef' dc (old:)
+              go (i + 1) os ms ns
 
-                dKCD_helper :: (Int,View) -> (Int,View) -> (Int,View) -> ST s (Int,View)
-                dKCD_helper (_,old) (_,mid) (nk,new) = do
-                  !new' <- diffDeferred mounted plan plan' old mid new
-                  return (nk,new')
+        -- 0+ 0
+        go _ olds mids [] = do
+          for_ olds (modifySTRef' dc . (:) . snd)
+          return []
 
-                dKCD_ins :: Int -> View -> ST s (Int,View)
-                dKCD_ins nk new = do
-                  removals <- readSTRef dc
-                  let ins (Just a) = amendPlan plan (insertAt (coerce e) a i)
-                  case IntMap.lookup nk removals of
-                    Nothing -> do
-                      !n' <- unsafeIOToST (build False mounted Nothing new)
-                      ins (getHost n')
-                      return (nk,n')
-                    Just (o,m) -> do
-                      writeSTRef dc $ IntMap.delete nk removals
-                      !new' <- diffDeferred mounted plan plan' o m new
-                      ins (getHost new')
-                      return (nk,new')
+        -- 0 0+
+        go _ [] _ news = do
+          frag <- unsafeIOToST createFrag
+          let n = Just (toNode frag)
+          news' <- for news $ \(nk,new) -> do
+              !new' <- unsafeIOToST (build False mounted n new)
+              return (nk,new')
+          amendPlan plan (append e frag)
+          return news'
 
-            start olds mids [] = do
-              for_ (zip olds mids) $ \((ok,o),(_,m)) -> modifySTRef' dc (IntMap.insert ok (o,m))
-              return []
+        dKCD_helper :: (Int,View) -> (Int,View) -> (Int,View) -> ST s (Int,View)
+        dKCD_helper (_,old) (_,mid) (nk,new) = do
+          !new' <- diffDeferred mounted plan plan' old mid new
+          return (nk,new')
 
-            start [] _ news = do
-              for news $ \(nk,new) -> do
-                removals <- readSTRef dc
-                case IntMap.lookup nk removals of
-                  Nothing -> do
-                    !new' <- unsafeIOToST $ build False mounted Nothing new
-                    for_ (getHost new') (amendPlan plan . append e)
-                    return (nk,new')
-
-                  Just (old,mid) -> do
-                    writeSTRef dc (IntMap.delete nk removals)
-                    !new' <- diffDeferred mounted plan plan' old mid new
-                    for_ (getHost new) (amendPlan plan . append e)
-                    return (nk,new')
+        dKCD_ins :: Int -> Int -> View -> ST s (Int,View)
+        dKCD_ins i nk new = do
+          removals <- readSTRef dc
+          let ins (Just a) = amendPlan plan (insertAt (coerce e) a i)
+          !n' <- unsafeIOToST (build False mounted Nothing new)
+          ins (getHost n')
+          return (nk,n')
 
