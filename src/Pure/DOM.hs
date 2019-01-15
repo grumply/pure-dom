@@ -288,133 +288,133 @@ buildComponent mtd mparent (ComponentView witness props _ comp) = do
   modifyIORef' mtd ((mounted c):)
   addIdleWork (newComponentThread cr new live props state2)
   return $ ComponentView witness props (Just cr) comp
+
+newComponentThread ref@Ref { crComponent = Comp {..}, ..} view0 live0 props0 state0 = do
+    st <- newIORef $! Six view0 live0 props0 state0 props0 state0
+    Just pq <- readIORef crPatchQueue
+    void $ forkIO $ execute $ do
+      executing
+      runThread ref pq st ([],[])
+
+runThread Ref { crComponent = Comp {..}, ..} pq st = worker
   where
-    newComponentThread ref@Ref { crComponent = Comp {..}, ..} view0 live0 props0 state0 = do
-        st <- newIORef $! Six view0 live0 props0 state0 props0 state0
-        Just pq <- readIORef crPatchQueue
-        void $ forkIO $ execute $ do
-          executing
-          run ref pq st ([],[])
+    worker ([],[])  = performIO (collect pq) >>= \cps -> worker ([],cps)
+    worker (acc,[]) = reconcile acc
+    worker other    = handleUpdate other
 
-    run Ref { crComponent = Comp {..}, ..} pq st = worker
-      where
-        worker ([],[])  = performIO (collect pq) >>= \cps -> worker ([],cps)
-        worker (acc,[]) = reconcile acc
-        worker other    = handleUpdate other
+    reconcile acc = do
+      dus <- for (List.reverse acc) $ \(willUpd,didUpd,callback) -> do
+        willUpd
+        return (didUpd,callback)
+      performIO $ do
+        Six old live props state newProps newState <- readIORef st
+        let new =
+              case reallyUnsafePtrEquality# props newProps of
+                1# -> case reallyUnsafePtrEquality# state newState of
+                        1# -> old
+                        _  -> render props newState
+                _  -> case reallyUnsafePtrEquality# state newState of
+                        1# -> render newProps state
+                        _  -> render newProps newState
+        mtd <- newIORef []
+        let (plan,plan',new_live) = buildPlan (\p p' -> do
+                new' <- diffDeferred mtd p p' live old new
+                return new'
+                )
+        writeIORef st $! Six new new_live newProps newState newProps newState
+        mtd <- plan `seq` plan' `seq` readIORef mtd
+        let hasAnimations = not $ List.null plan
+            hasIdleWork = not $ List.null plan'
+        if hasAnimations && hasIdleWork
+          then do
+            barrier <- newEmptyMVar
+            addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : (writeIORef crView new_live) : plan )
+            takeMVar barrier
+          else do
+            when hasAnimations $ do
+              barrier <- newEmptyMVar
+              addAnimationsReverse ( (putMVar barrier ()) : (writeIORef crView new_live) : plan )
+              takeMVar barrier
+            when hasIdleWork $ do
+              void (addIdleWorksReverse plan')
+        runPlan mtd
+      cbs <- for dus $ \(du,c) -> do
+        du
+        return c
+      foldr (>>) (return ()) cbs
+      worker ([],[])
 
-        reconcile acc = do
-          dus <- for (List.reverse acc) $ \(willUpd,didUpd,callback) -> do
-            willUpd
-            return (didUpd,callback)
+    handleUpdate (acc,cp:cps) =
+      case cp of
+        Unmount mv mtd -> do
+          unmounted
           performIO $ do
-            Six old live props state newProps newState <- readIORef st
-            let new =
-                  case reallyUnsafePtrEquality# props newProps of
-                    1# -> case reallyUnsafePtrEquality# state newState of
-                            1# -> old
-                            _  -> render props newState
-                    _  -> case reallyUnsafePtrEquality# state newState of
-                            1# -> render newProps state
-                            _  -> render newProps newState
-            mtd <- newIORef []
-            let (plan,plan',new_live) = buildPlan (\p p' -> do
-                    new' <- diffDeferred mtd p p' live old new
-                    return new'
-                    )
-            writeIORef st $! Six new new_live newProps newState newProps newState
-            mtd <- plan `seq` plan' `seq` readIORef mtd
-            let hasAnimations = not $ List.null plan
-                hasIdleWork = not $ List.null plan'
-            if hasAnimations && hasIdleWork
-              then do
-                barrier <- newEmptyMVar
-                addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : (writeIORef crView new_live) : plan )
-                takeMVar barrier
-              else do
-                when hasAnimations $ do
-                  barrier <- newEmptyMVar
-                  addAnimationsReverse ( (putMVar barrier ()) : (writeIORef crView new_live) : plan )
-                  takeMVar barrier
-                when hasIdleWork $ do
-                  void (addIdleWorksReverse plan')
-            runPlan mtd
-          cbs <- for dus $ \(du,c) -> do
-            du
-            return c
-          foldr (>>) (return ()) cbs
-          worker ([],[])
-
-        handleUpdate (acc,cp:cps) =
-          case cp of
-            Unmount mv mtd -> do
-              unmounted
-              performIO $ do
-                Six old live _ _ _ _ <- readIORef st
-                writeIORef crPatchQueue Nothing
-                let (plan,plan',res) = buildPlan $ \plan plan' ->
-                        let removeDeferred = do
-                              amendPlan plan' (cleanup live)
-                                -- for_ (getHost live) $ \host -> amendPlan plan' $ removeNodeMaybe host
-                            replaceDeferred old@(getHost -> oldHost) new@(getHost -> newHost) =
-                              case oldHost of
-                                Nothing -> error "Expected old host in replaceDeferred; got nothing."
-                                Just oh ->
-                                  case newHost of
-                                    Nothing -> error "Expected new host in replaceDeferred; got nothing."
-                                    Just nh -> do
-                                      amendPlan plan  (replaceNode oh nh)
-                                      amendPlan plan' (cleanup old)
-                        in maybe removeDeferred (replaceDeferred live) mv
-                plan `seq` plan' `seq`
-                  let hasAnimations = not $ List.null plan
-                      hasIdleWork   = not $ List.null plan'
-                  in
-                    if hasAnimations && hasIdleWork
-                      then do
-                        barrier <- newEmptyMVar
-                        addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : plan )
-                        takeMVar barrier
-                      else do
-                        when hasAnimations $ do
-                          barrier <- newEmptyMVar
-                          addAnimationsReverse ( (putMVar barrier ()) : plan )
-                          takeMVar barrier
-                        when hasIdleWork $ do
-                          void $ addIdleWorksReverse plan'
-                writeIORef st      undefined
-                writeIORef crProps (error "ask: Component invalidated.")
-                writeIORef crState (error "get: Component invalidated.")
-                writeIORef crView  (error "look: Component invalidated.")
-                mtd
-            UpdateProperties newProps' -> do
-              Six old live props state newProps newState <- performIO $ readIORef st
-              newState'    <- receive newProps' newState
-              shouldUpdate <- force   newProps' newState'
-              performIO $ writeIORef st $! Six old live props state newProps' newState'
-              let writeRefs = writeIORef crProps newProps' >> writeIORef crState newState'
-              if shouldUpdate || not (List.null acc) then do
-                let
-                  will = update  newProps' newState'
-                  did  = updated newProps  newState
-                worker ((will >> performIO writeRefs,did,performIO (return ())) : acc,cps)
-              else do
-                performIO writeRefs
-                worker (acc,cps)
-            UpdateState f -> do
-              Six old live props state newProps newState <- performIO $ readIORef st
-              (newState',updatedCallback) <- f newProps newState
-              shouldUpdate                <- force newProps newState'
-              performIO $ writeIORef st $! Six old live props state newProps newState'
-              let writeRef = writeIORef crState newState'
-              if shouldUpdate || not (List.null acc) then
-                let
-                  will = update  newProps newState'
-                  did  = updated newProps newState
-                in
-                  worker ((will >> performIO writeRef,did,updatedCallback) : acc,cps)
-              else do
-                performIO writeRef
-                worker (acc,cps)
+            Six old live _ _ _ _ <- readIORef st
+            writeIORef crPatchQueue Nothing
+            let (plan,plan',res) = buildPlan $ \plan plan' ->
+                    let removeDeferred = do
+                          amendPlan plan' (cleanup live)
+                            -- for_ (getHost live) $ \host -> amendPlan plan' $ removeNodeMaybe host
+                        replaceDeferred old@(getHost -> oldHost) new@(getHost -> newHost) =
+                          case oldHost of
+                            Nothing -> error "Expected old host in replaceDeferred; got nothing."
+                            Just oh ->
+                              case newHost of
+                                Nothing -> error "Expected new host in replaceDeferred; got nothing."
+                                Just nh -> do
+                                  amendPlan plan  (replaceNode oh nh)
+                                  amendPlan plan' (cleanup old)
+                    in maybe removeDeferred (replaceDeferred live) mv
+            plan `seq` plan' `seq`
+              let hasAnimations = not $ List.null plan
+                  hasIdleWork   = not $ List.null plan'
+              in
+                if hasAnimations && hasIdleWork
+                  then do
+                    barrier <- newEmptyMVar
+                    addAnimationsReverse ( (putMVar barrier ()) : (void $ addIdleWorksReverse plan') : plan )
+                    takeMVar barrier
+                  else do
+                    when hasAnimations $ do
+                      barrier <- newEmptyMVar
+                      addAnimationsReverse ( (putMVar barrier ()) : plan )
+                      takeMVar barrier
+                    when hasIdleWork $ do
+                      void $ addIdleWorksReverse plan'
+            writeIORef st      undefined
+            writeIORef crProps (error "ask: Component invalidated.")
+            writeIORef crState (error "get: Component invalidated.")
+            writeIORef crView  (error "look: Component invalidated.")
+            mtd
+        UpdateProperties newProps' -> do
+          Six old live props state newProps newState <- performIO $ readIORef st
+          newState'    <- receive newProps' newState
+          shouldUpdate <- force   newProps' newState'
+          performIO $ writeIORef st $! Six old live props state newProps' newState'
+          let writeRefs = writeIORef crProps newProps' >> writeIORef crState newState'
+          if shouldUpdate || not (List.null acc) then do
+            let
+              will = update  newProps' newState'
+              did  = updated newProps  newState
+            worker ((will >> performIO writeRefs,did,performIO (return ())) : acc,cps)
+          else do
+            performIO writeRefs
+            worker (acc,cps)
+        UpdateState f -> do
+          Six old live props state newProps newState <- performIO $ readIORef st
+          (newState',updatedCallback) <- f newProps newState
+          shouldUpdate                <- force newProps newState'
+          performIO $ writeIORef st $! Six old live props state newProps newState'
+          let writeRef = writeIORef crState newState'
+          if shouldUpdate || not (List.null acc) then
+            let
+              will = update  newProps newState'
+              did  = updated newProps newState
+            in
+              worker ((will >> performIO writeRef,did,updatedCallback) : acc,cps)
+          else do
+            performIO writeRef
+            worker (acc,cps)
 
 data Six a b c d e f = Six !a !b !c !d !e !f
 
