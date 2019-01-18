@@ -200,7 +200,7 @@ build mtd mparent KSVGView {..} = do
   fs <- setFeatures mtd e features
   for_ mparent (`append` e)
   return $ KSVGView (Just e) tag fs xlinks cs
-build mtd mparent p@PortalView{} =
+build mtd mparent p@PortalView{} = do
   buildPortal mtd mparent p
 
 setXLinks :: Element -> Map Txt Txt -> IO ()
@@ -225,7 +225,7 @@ setClasses' e = setAttribute e "class" . Txt.intercalate " " . Set.toList . Set.
 setStyles :: Element -> Map Txt Txt -> IO ()
 setStyles e ss
   | Map.null ss = return ()
-  | otherwise = setStyles e ss
+  | otherwise = setStyles' e ss
 
 setStyles' e = traverse_ (uncurry (setStyle e)) . Map.toList
 
@@ -301,26 +301,30 @@ buildComponent mtd mparent (ComponentView witness props _ comp) = do
   live <- build mtd mparent new
   writeIORef live_ live
   modifyIORef' mtd ((mounted c):)
-  addIdleWork (newComponentThread cr new live props state2)
+  addIdleWork (newComponentThread cr new props state2)
   return $ ComponentView witness props (Just cr) comp
 
-newComponentThread ref@Ref { crComponent = Comp {..}, ..} view0 live0 props0 state0 = do
-    st <- newIORef $ Six view0 live0 props0 state0 props0 state0
+newComponentThread :: Ref m props state -> View -> props -> state -> IO ()
+newComponentThread ref@Ref { crComponent = Comp {..}, ..} view0 props0 state0 = do
+    st <- newIORef $! Five view0 props0 state0 props0 state0
     Just pq <- readIORef crPatchQueue
     void $ forkIO $ execute $ do
       executing
       runThread ref pq st
 
+runThread :: Ref m props state -> Queue (ComponentPatch m props state) -> IORef (Five View props state props state) -> m ()
 runThread Ref { crComponent = Comp {..}, ..} pq st = start
   where
-    start = performIO (collect pq) >>= \cps -> handleUpdate ([],cps)
+    start = do
+      performIO (collect pq) >>= \cps -> handleUpdate ([],cps)
 
     reconcile acc = do
       dus <- for (List.reverse acc) $ \(willUpd,didUpd,callback) -> do
         willUpd
         return (didUpd,callback)
       performIO $ do
-        Six old live props state newProps newState <- readIORef st
+        Five old props state newProps newState <- readIORef st
+        live <- readIORef crView
         let new =
               case reallyUnsafePtrEquality# props newProps of
                 1# -> case reallyUnsafePtrEquality# state newState of
@@ -334,7 +338,7 @@ runThread Ref { crComponent = Comp {..}, ..} pq st = start
                 new' <- diffDeferred mtd p p' live old new
                 return new'
                 )
-        writeIORef st $ Six new new_live newProps newState newProps newState
+        writeIORef st $! Five new newProps newState newProps newState
         mtd <- plan `seq` plan' `seq` readIORef mtd
         let hasAnimations = not $ List.null plan
             hasIdleWork = not $ List.null plan'
@@ -358,12 +362,13 @@ runThread Ref { crComponent = Comp {..}, ..} pq st = start
       start
 
     handleUpdate (acc,[]) = reconcile acc
-    handleUpdate (acc,cp:cps) =
+    handleUpdate (acc,cp:cps) = do
       case cp of
         Unmount mv mtd -> do
           unmounted
           performIO $ do
-            Six old live _ _ _ _ <- readIORef st
+            Five old _ _ _ _ <- readIORef st
+            live <- readIORef crView
             writeIORef crPatchQueue Nothing
             let (plan,plan',res) = buildPlan $ \plan plan' ->
                     let removeDeferred = do
@@ -401,10 +406,11 @@ runThread Ref { crComponent = Comp {..}, ..} pq st = start
             writeIORef crView  (error "look: Component invalidated.")
             mtd
         UpdateProperties newProps' -> do
-          Six old live props state newProps newState <- performIO $ readIORef st
+          Five old props state newProps newState <- performIO $ readIORef st
+          live <- performIO $ readIORef crView
           newState'    <- receive newProps' newState
           shouldUpdate <- force   newProps' newState'
-          performIO $ writeIORef st $ Six old live props state newProps' newState'
+          performIO $ writeIORef st $! Five old props state newProps' newState'
           let writeRefs = writeIORef crProps newProps' >> writeIORef crState newState'
           if shouldUpdate || not (List.null acc) then do
             let
@@ -415,10 +421,11 @@ runThread Ref { crComponent = Comp {..}, ..} pq st = start
             performIO writeRefs
             handleUpdate (acc,cps)
         UpdateState f -> do
-          Six old live props state newProps newState <- performIO $ readIORef st
+          Five old props state newProps newState <- performIO $ readIORef st
+          live <- performIO $ readIORef crView
           (newState',updatedCallback) <- f newProps newState
           shouldUpdate                <- force newProps newState'
-          performIO $ writeIORef st $ Six old live props state newProps newState'
+          performIO $ writeIORef st $! Five old props state newProps newState'
           let writeRef = writeIORef crState newState'
           if shouldUpdate || not (List.null acc) then
             let
@@ -430,7 +437,7 @@ runThread Ref { crComponent = Comp {..}, ..} pq st = start
             performIO writeRef
             handleUpdate (acc,cps)
 
-data Six a b c d e f = Six a b c d !e !f
+data Five a b c d e = Five a b c !d !e
 
 cleanupListener :: Listener -> IO ()
 cleanupListener (On _ _ _ _ stp) = stp
