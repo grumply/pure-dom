@@ -317,8 +317,7 @@ awaitComponentPatches pq = do
 
 newComponentThread :: forall props state. Ref props state -> Comp props state -> View -> View -> props -> state -> IO ()
 newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state -> do
-  executing
-  loop live view props state
+  executing state >>= loop live view props
   where
     loop :: View -> View -> props -> state -> IO ()
     loop !old !mid !props !state = do
