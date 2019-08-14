@@ -150,6 +150,7 @@ yield_ =
 #endif
 
 -- | Given a host node and a View, build and embed the View.
+{-# INLINABLE inject #-}
 inject :: IsNode e => e -> View -> IO ()
 inject host v = do
   mtd <- newIORef []
@@ -697,13 +698,13 @@ diffXLinksDeferred' e p mid new = do
           a = traverse_ add adds
       amendPlan p a
 
-diffClassesDeferred :: Element ->Plan s -> Set Txt -> Set Txt -> ST s ()
+diffClassesDeferred :: Element -> Plan s -> Set Txt -> Set Txt -> ST s ()
 diffClassesDeferred e p !mid !new =
   case reallyUnsafePtrEquality# mid new of
     1# -> return ()
     _  -> diffClassesDeferred' e p mid new
 
-diffClassesDeferred' :: Element ->Plan s -> Set Txt -> Set Txt -> ST s ()
+diffClassesDeferred' :: Element -> Plan s -> Set Txt -> Set Txt -> ST s ()
 diffClassesDeferred' e p mid new
   | Set.null mid && Set.null new = return ()
   | Set.null new = amendPlan p (removeProperty e "className")
