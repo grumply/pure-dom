@@ -106,9 +106,6 @@ import Pure.Data.Queue (Queue,newQueue,arrive,collect)
 import Pure.Data.Txt (Txt)
 import qualified Pure.Data.Txt as Txt (intercalate)
 
-import Debug.Trace
-import Control.Concurrent
-
 {-
 Be careful in this module or GHC might eat your lunch.
 -}
@@ -343,9 +340,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props ->
             go1 acc [] = do
               let (wills,dids,after) = unzip3 (List.reverse acc)
 
-              tid <- myThreadId
-              traceShow (tid,isTrue# (reallyUnsafePtrEquality# props newProps),isTrue# (reallyUnsafePtrEquality# state newState))
-                $ sequence_ wills
+              sequence_ wills
 
               mtd <- newIORef []
 
