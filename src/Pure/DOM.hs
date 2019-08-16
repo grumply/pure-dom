@@ -548,12 +548,12 @@ diffDeferred mounted plan plan' old !mid !new =
             replaceDeferred plan plan' old new'
       in
         case (mid,new) of
-          (LazyView f a,LazyView f' a') ->
-            case reallyUnsafePtrEquality# f (unsafeCoerce f') of
-              1# -> case reallyUnsafePtrEquality# a (unsafeCoerce a') of
-                      1# -> return old
-                      _  -> diffDeferred' mounted plan plan' old (view (f a)) (view (f' a'))
-              _  -> replace
+          (LazyView f a,LazyView f' a')
+            | isTrue# (reallyUnsafePtrEquality# f (unsafeCoerce f'))
+            , isTrue# (reallyUnsafePtrEquality# a (unsafeCoerce a')) -> 
+              return old
+            | otherwise -> 
+              diffDeferred' mounted plan plan' old (view (f a)) (view (f' a'))
 
           (ComponentView t p _ v,ComponentView t' p' _ v') ->
             case old of
@@ -594,12 +594,10 @@ diffDeferred mounted plan plan' old !mid !new =
                   _  -> replace
               _ -> replace
 
-          (SomeView m,SomeView n)
-            | sameTypeWitness (__pure_witness (asProxyOf m)) (__pure_witness (asProxyOf n)) ->
-              case reallyUnsafePtrEquality# m (unsafeCoerce n) of
-                1# -> return old
-                _  -> diffDeferred' mounted plan plan' old (view m) (view n)
-            | otherwise -> replace
+          (SomeView m,SomeView n) ->
+            case reallyUnsafePtrEquality# m (unsafeCoerce n) of
+              1# -> return old
+              _  -> diffDeferred' mounted plan plan' old (view m) (view n)
 
           (SVGView{},SVGView{}) ->
             case reallyUnsafePtrEquality# (tag mid) (tag new) of
