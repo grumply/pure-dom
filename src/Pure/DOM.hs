@@ -195,7 +195,7 @@ build mtd = start
           modifyIORef' mtd ((mounted c):)
           addIdleWork $ void $ forkIO $ newComponentThread cr c live new props state2
           return $ ComponentView witness props (Just cr) comp
-        go (LazyView f a) = go' (view $ f a)
+        go (LazyView f a) = go' (f a)
         go TextView {..} = do
           tn <- createText content
           for_ mparent (`append` tn)
@@ -553,7 +553,7 @@ diffDeferred mounted plan plan' old !mid !new =
             , isTrue# (reallyUnsafePtrEquality# a (unsafeCoerce a')) -> 
               return old
             | otherwise -> 
-              diffDeferred' mounted plan plan' old (view (f a)) (view (f' a'))
+              diffDeferred' mounted plan plan' old (f a) (f' a')
 
           (ComponentView t p _ v,ComponentView t' p' _ v') ->
             case old of
