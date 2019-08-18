@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, OverloadedStrings, RankNTypes, ScopedTypeVariables, PatternSynonyms, ViewPatterns, MagicHash, RecordWildCards, BangPatterns, LambdaCase #-}
-module Pure.DOM (inject) where
+module Pure.DOM where
 
 -- from base
 import Control.Concurrent (MVar,newEmptyMVar,putMVar,takeMVar,yield,forkIO)
@@ -16,7 +16,7 @@ import Data.Maybe (fromJust)
 import Data.STRef (STRef,newSTRef,readSTRef,modifySTRef',writeSTRef)
 import Data.Traversable (for,traverse)
 import Data.Typeable (Typeable)
-import GHC.Exts (reallyUnsafePtrEquality#,isTrue#)
+import GHC.Exts (reallyUnsafePtrEquality#,isTrue#,unsafeCoerce#)
 import System.IO.Unsafe (unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -117,6 +117,7 @@ type Removals s = STRef s [View]
 newPlan :: ST s (Plan s)
 newPlan = newSTRef []
 
+{-# INLINE buildPlan #-}
 buildPlan :: (forall s. Plan s -> Plan s -> ST s a) -> ([IO ()],[IO ()],a)
 buildPlan f = runST $ do
   p  <- newPlan
@@ -126,12 +127,23 @@ buildPlan f = runST $ do
   p' <- readSTRef p'
   return (p,p',a)
 
+{-# INLINE amendPlan #-}
 amendPlan :: Plan s -> IO () -> ST s ()
 amendPlan plan f = modifySTRef' plan (f:)
 
+{-# INLINE runPlan #-}
 runPlan :: [IO ()] -> IO ()
-runPlan = foldr (flip (>>)) (return ())
+runPlan = go
+  where
+    {-# NOINLINE go' #-}
+    go' = go
+    {-# INLINE go #-}
+    go [] = pure ()
+    go (x:xs) = do
+      go' xs
+      x
 
+{-# INLINE sync #-}
 sync :: (MVar () -> IO a) -> IO ()
 sync f = do
   barrier <- newEmptyMVar
@@ -147,6 +159,7 @@ yield_ =
 #endif
 
 -- | Given a host node and a View, build and embed the View.
+{-# INLINE inject #-}
 inject :: IsNode e => e -> View -> IO ()
 inject host v = do
   mtd <- newIORef []
@@ -157,6 +170,7 @@ inject host v = do
 build' :: IORef [IO ()] -> Maybe Node -> View -> IO View
 build' = build
 
+{-# INLINE build #-}
 build :: IORef [IO ()] -> Maybe Node -> View -> IO View
 build mtd = start
   where
@@ -325,6 +339,7 @@ awaitComponentPatches pq = do
   mpq <- readIORef pq
   for mpq collect `catch` \(_ :: SomeException) -> return Nothing
 
+{-# NOINLINE newComponentThread #-}
 newComponentThread :: forall props state. Ref props state -> Comp props state -> View -> View -> props -> state -> IO ()
 newComponentThread ref@Ref {..} comp@Comp {..} = \live view props -> 
   executing >=> loop live view props
@@ -333,6 +348,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props ->
     loop' :: View -> View -> props -> state -> IO ()
     loop' = loop -- loopbreaker
 
+    {-# INLINE loop #-}
     loop :: View -> View -> props -> state -> IO ()
     loop !old !mid !props !state = do
       mps <- awaitComponentPatches crPatchQueue
@@ -374,31 +390,34 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props ->
                 hasAnimations = not (List.null plan)
                 hasIdleWork   = not (List.null plan')
 
-              mounts <- plan `seq` plan' `seq` readIORef mtd
+              mounts <- readIORef mtd
 
-              if hasAnimations && hasIdleWork then
-
+              if hasAnimations && hasIdleWork then do
+                let !a = runPlan plan
+                    !i = runPlan plan'
                 sync $ \barrier ->
                   addAnimationsReverse
-                    ( (putMVar barrier ())
-                    : (void (addIdleWorksReverse plan'))
-                    : (writeIORef crView new_old)
-                    : plan
-                    )
+                    [ putMVar barrier ()
+                    , void (addIdleWork i)
+                    , writeIORef crView new_old
+                    , a
+                    ]
 
               else do
 
-                when hasAnimations $
+                when hasAnimations $ do
+                  let !a = runPlan plan
 
                   sync $ \barrier ->
                     addAnimationsReverse
-                      ( putMVar barrier ()
-                      : writeIORef crView new_old
-                      : plan
-                      )
+                      [ putMVar barrier ()
+                      , writeIORef crView new_old
+                      , a
+                      ]
 
-                when hasIdleWork $ void $
-                  addIdleWorksReverse plan'
+                when hasIdleWork $ void $ do
+                  let !i = runPlan plan'
+                  addIdleWork i
 
               runPlan mounts
 
@@ -427,33 +446,34 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props ->
                           (void . replaceDeferred plan plan' old)
                           mv
 
-                  plan `seq` plan' `seq`
-                    let
-                      hasAnimations = not $ List.null plan
-                      hasIdleWork   = not $ List.null plan'
-                    in
-                      if hasAnimations && hasIdleWork
-                        then
+                    hasAnimations = not $ List.null plan
+                    hasIdleWork   = not $ List.null plan'
 
-                          sync $ \barrier ->
-                            addAnimationsReverse
-                              ( putMVar barrier ()
-                              : void (addIdleWorksReverse plan')
-                              : plan
-                              )
+                  if hasAnimations && hasIdleWork
+                    then do
+                      let !a = runPlan plan
+                          !i = runPlan plan'
+                      sync $ \barrier ->
+                        addAnimationsReverse
+                          [ putMVar barrier ()
+                          , void (addIdleWork i) 
+                          , a
+                          ]
 
-                        else do
+                    else do
 
-                          when hasAnimations $
+                      when hasAnimations $ do
+                        let !a = runPlan plan
 
-                            sync $ \barrier ->
-                              addAnimationsReverse
-                                ( putMVar barrier ()
-                                : plan
-                                )
+                        sync $ \barrier ->
+                          addAnimationsReverse
+                            [ putMVar barrier ()
+                            , a
+                            ]
 
-                          when hasIdleWork $ void $
-                            addIdleWorksReverse plan'
+                      when hasIdleWork $ void $ do
+                        let !i = runPlan plan'
+                        addIdleWork i
 
                   writeIORef crProps (error "ask: Component invalidated.")
                   writeIORef crState (error "get: Component invalidated.")
@@ -512,6 +532,7 @@ cleanupListener (On _ _ _ _ stp) = stp
 cleanup' :: View -> IO ()
 cleanup' = cleanup
 
+{-# INLINE cleanup #-}
 cleanup :: View -> IO ()
 cleanup RawView {..} =
   for_ (listeners features) cleanupListener
@@ -537,6 +558,7 @@ cleanup _ = return ()
 diffDeferred' :: forall s. IORef [IO ()] -> Plan s -> Plan s -> View -> View -> View -> ST s View
 diffDeferred' = diffDeferred
 
+{-# INLINE diffDeferred #-}
 diffDeferred :: forall s. IORef [IO ()] -> Plan s -> Plan s -> View -> View -> View -> ST s View
 diffDeferred mounted plan plan' old !mid !new =
   case reallyUnsafePtrEquality# mid new of
@@ -546,11 +568,19 @@ diffDeferred mounted plan plan' old !mid !new =
           replace = do
             new' <- unsafeIOToST (build mounted Nothing new)
             replaceDeferred plan plan' old new'
+
+          sameTag = 
+            let 
+              !t1 = tag mid
+              !t2 = tag new
+             in 
+              isTrue# (reallyUnsafePtrEquality# t1 t2)
+          cmpTag = sameTag || tag mid == tag new
       in
         case (mid,new) of
           (LazyView f a,LazyView f' a')
-            | isTrue# (reallyUnsafePtrEquality# f (unsafeCoerce f'))
-            , isTrue# (reallyUnsafePtrEquality# a (unsafeCoerce a')) -> 
+            | isTrue# (unsafeCoerce# reallyUnsafePtrEquality# f f')
+            , isTrue# (unsafeCoerce# reallyUnsafePtrEquality# a a') -> 
               return old
             | otherwise -> 
               diffDeferred' mounted plan plan' old (f a) (f' a')
@@ -559,10 +589,10 @@ diffDeferred mounted plan plan' old !mid !new =
             case old of
               ComponentView _ _ (Just r0) _
                 | sameTypeWitness t t' ->
-                  case reallyUnsafePtrEquality# p (unsafeCoerce p') of
+                  case unsafeCoerce# reallyUnsafePtrEquality# p p' of
                     1# -> return old
                     _  -> do
-                          let r = unsafeCoerce r0
+                          let r = unsafeCoerce# r0
                           unsafeIOToST $ setProps r p'
                           return (ComponentView t' p' (Just r) v')
                 | otherwise -> unsafeIOToST $ do
@@ -571,51 +601,38 @@ diffDeferred mounted plan plan' old !mid !new =
                   queueComponentUpdate r0 (Unmount (Just new') (readIORef mtd >>= runPlan))
                   return new'
 
-          (HTMLView{},HTMLView{}) ->
-            case reallyUnsafePtrEquality# (tag mid) (tag new) of
-              1# -> diffElementDeferred mounted plan plan' old mid new
-              _ | tag mid == tag new -> diffElementDeferred mounted plan plan' old mid new
-                | otherwise          -> replace
+          (HTMLView{},HTMLView{})
+            | cmpTag -> diffElementDeferred mounted plan plan' old mid new
+            | otherwise -> replace
 
-          (TextView _ t,TextView _ t') ->
-            case reallyUnsafePtrEquality# t t' of
-              0# | t /= t' -> replaceTextContentDeferred plan old new
-              _            -> return old
+          (TextView _ t,TextView _ t')
+            | isTrue# (reallyUnsafePtrEquality# t t') || t == t' -> return old
+            | otherwise -> replaceTextContentDeferred plan old new
 
           (NullView{},NullView{}) -> return old
 
-          (RawView{},RawView{}) ->
-            case reallyUnsafePtrEquality# (tag mid) (tag new) of
-              1# -> do
-                case reallyUnsafePtrEquality# (content mid) (content new) of
-                  1# -> do
-                    fs <- diffFeaturesDeferred (coerce $ fromJust $ getHost old) plan (features old) (features mid) (features new)
-                    return old { features = fs }
-                  _  -> replace
-              _ -> replace
+          (RawView{},RawView{}) 
+            | cmpTag
+            , isTrue# (reallyUnsafePtrEquality# (content mid) (content new)) -> do
+              fs <- diffFeaturesDeferred (coerce $ fromJust $ getHost old) plan (features old) (features mid) (features new)
+              return old { features = fs }
+            | otherwise -> replace
 
-          (SomeView m,SomeView n) ->
-            case reallyUnsafePtrEquality# m (unsafeCoerce n) of
-              1# -> return old
-              _  -> diffDeferred' mounted plan plan' old (view m) (view n)
+          (SomeView m,SomeView n)
+            | isTrue# (unsafeCoerce# reallyUnsafePtrEquality# m n) -> return old
+            | otherwise -> diffDeferred' mounted plan plan' old (view m) (view n)
 
-          (SVGView{},SVGView{}) ->
-            case reallyUnsafePtrEquality# (tag mid) (tag new) of
-              1# -> diffSVGElementDeferred mounted plan plan' old mid new
-              _ | tag mid == tag new -> diffSVGElementDeferred mounted plan plan' old mid new
-                | otherwise          -> replace
+          (SVGView{},SVGView{})
+            | cmpTag -> diffSVGElementDeferred mounted plan plan' old mid new
+            | otherwise -> replace
 
-          (KHTMLView{},KHTMLView{}) ->
-            case reallyUnsafePtrEquality# (tag mid) (tag new) of
-              1# -> diffKeyedElementDeferred mounted plan plan' old mid new
-              _ | tag mid == tag new -> diffKeyedElementDeferred mounted plan plan' old mid new
-                | otherwise          -> replace
+          (KHTMLView{},KHTMLView{})
+            | cmpTag -> diffKeyedElementDeferred mounted plan plan' old mid new
+            | otherwise -> replace
 
-          (KSVGView{},KSVGView{}) ->
-            case reallyUnsafePtrEquality# (tag mid) (tag new) of
-              1# -> diffSVGKeyedElementDeferred mounted plan plan' old mid new
-              _ | tag mid == tag new -> diffSVGKeyedElementDeferred mounted plan plan' old mid new
-                | otherwise          -> replace
+          (KSVGView{},KSVGView{})
+            | cmpTag -> diffSVGKeyedElementDeferred mounted plan plan' old mid new
+            | otherwise -> replace
 
           (PortalView{},PortalView{})
             | same (toJSV (portalDestination old)) (toJSV (portalDestination new)) -> do
@@ -644,6 +661,7 @@ diffDeferred mounted plan plan' old !mid !new =
 
           _ -> replace
 
+{-# INLINE diffElementDeferred #-}
 diffElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
 diffElementDeferred mounted plan plan' old !mid !new =
   case reallyUnsafePtrEquality# mid new of
@@ -660,8 +678,15 @@ diffElementDeferred' mounted plan plan' old@(elementHost -> Just e) mid new = do
     , children = cs
     }
 
+{-# INLINE diffSVGElementDeferred #-}
 diffSVGElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
-diffSVGElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new = do
+diffSVGElementDeferred  mounted plan plan' old !mid !new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return old
+    _  -> diffSVGElementDeferred' mounted plan plan' old mid new
+
+diffSVGElementDeferred' :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
+diffSVGElementDeferred' mounted plan plan' old@(elementHost -> Just e) !mid !new = do
   unsafeIOToST yield_
   diffXLinksDeferred e plan (xlinks mid) (xlinks new)
   fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
@@ -671,6 +696,7 @@ diffSVGElementDeferred mounted plan plan' old@(elementHost -> Just e) !mid !new 
     , children = cs
     }
 
+{-# INLINE diffFeaturesDeferred #-}
 diffFeaturesDeferred :: Element -> Plan s -> DiffST s Features
 diffFeaturesDeferred e plan old !mid !new = do
   case reallyUnsafePtrEquality# mid new of
@@ -687,6 +713,7 @@ diffFeaturesDeferred' e plan old mid new = do
   diffLifecyclesDeferred e plan (lifecycles old) (lifecycles mid) (lifecycles new)
   return old { listeners = ls }
 
+{-# INLINE diffXLinksDeferred #-}
 diffXLinksDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
 diffXLinksDeferred e p !mid !new =
   case reallyUnsafePtrEquality# mid new of
@@ -706,6 +733,7 @@ diffXLinksDeferred' e p mid new = do
           a = traverse_ add adds
       amendPlan p a
 
+{-# INLINE diffClassesDeferred #-}
 diffClassesDeferred :: Element -> Plan s -> Set Txt -> Set Txt -> ST s ()
 diffClassesDeferred e p !mid !new =
   case reallyUnsafePtrEquality# mid new of
@@ -720,6 +748,7 @@ diffClassesDeferred' e p mid new
     let cs = Txt.intercalate " " $ Set.toList $ Set.delete "" new
     in amendPlan p (setProperty e "className" cs)
 
+{-# INLINE diffStylesDeferred #-}
 diffStylesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
 diffStylesDeferred e p !mid !new =
   case reallyUnsafePtrEquality# mid new of
@@ -739,6 +768,7 @@ diffStylesDeferred' e p mid new = do
           a = traverse_ add adds
       amendPlan p a
 
+{-# INLINE diffAttributesDeferred #-}
 diffAttributesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
 diffAttributesDeferred e p !mid !new =
   case reallyUnsafePtrEquality# mid new of
@@ -758,6 +788,7 @@ diffAttributesDeferred' e p mid new = do
           a = traverse_ add adds
       amendPlan p a
 
+{-# INLINE diffPropertiesDeferred #-}
 diffPropertiesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
 diffPropertiesDeferred e p !mid !new =
   case reallyUnsafePtrEquality# mid new of
@@ -813,6 +844,7 @@ addListenerDeferred e plan l@(On n t o a _) = do
 removeListenerDeferred :: Plan s -> Listener -> ST s ()
 removeListenerDeferred p (On _ _ _ _ stp) = amendPlan p stp
 
+{-# INLINE diffListenersDeferred #-}
 diffListenersDeferred :: Element -> Plan s -> [Listener] -> [Listener] -> [Listener] -> ST s [Listener]
 diffListenersDeferred e p old !mid !new =
   case reallyUnsafePtrEquality# mid new of
@@ -852,8 +884,9 @@ unsafeLookupPair ((o,m) : xs) n =
 addLifecycleDeferred :: Element -> Plan s -> Lifecycle -> ST s ()
 addLifecycleDeferred e p (HostRef w) = amendPlan p $ w (toNode e)
 
+{-# INLINE diffLifecyclesDeferred #-}
 diffLifecyclesDeferred :: Element -> Plan s -> [Lifecycle] -> [Lifecycle] -> [Lifecycle] -> ST s ()
-diffLifecyclesDeferred e p old mid new =
+diffLifecyclesDeferred e p old !mid !new =
   case reallyUnsafePtrEquality# mid new of
     1# -> return ()
     _  -> diffLifecyclesDeferred' e p old mid new
@@ -878,8 +911,9 @@ unsafeContains (x : xs) a =
 --       | otherwise              = Just $ setStyle e nm val2
 --     remove = Map.mapWithKey (\nm  _  -> removeStyle e nm)
 --     add    = Map.mapWithKey (\nm val -> setStyle e nm val)
+{-# INLINE diffChildrenDeferred #-}
 diffChildrenDeferred :: forall s. Element -> IORef [IO ()] -> Plan s -> Plan s -> DiffST s [View]
-diffChildrenDeferred e mounted plan plan' olds mids news =
+diffChildrenDeferred e mounted plan plan' olds !mids !news =
   case reallyUnsafePtrEquality# mids news of
     1# -> return olds
     _  -> diffChildrenDeferred' e mounted plan plan' olds mids news
@@ -909,6 +943,7 @@ diffChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
     {-# NOINLINE go' #-}
     go' = go
 
+    {-# INLINE go #-}
     go os ms ns =
       case reallyUnsafePtrEquality# ms ns of
         1# -> return os
@@ -957,8 +992,15 @@ replaceTextContentDeferred plan old@(textHost -> Just oh) new = do
   amendPlan plan (oh `replaceText` content new)
   return new { textHost = Just oh }
 
+{-# INLINE diffSVGKeyedElementDeferred #-}
 diffSVGKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
-diffSVGKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
+diffSVGKeyedElementDeferred mounted plan plan' old !mid !new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> pure old
+    _  -> diffSVGKeyedElementDeferred' mounted plan plan' old mid new
+
+diffSVGKeyedElementDeferred' :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
+diffSVGKeyedElementDeferred' mounted plan plan' old@(elementHost -> Just e) mid new = do
   unsafeIOToST yield_
   fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
   cs <- diffKeyedChildrenDeferred e mounted plan plan' (keyedChildren old) (keyedChildren mid) (keyedChildren new)
@@ -968,6 +1010,7 @@ diffSVGKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) mid n
     , keyedChildren = cs
     }
 
+{-# INLINE diffKeyedElementDeferred #-}
 diffKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
 diffKeyedElementDeferred mounted plan plan' old !mid !new = do
   case reallyUnsafePtrEquality# mid new of
@@ -993,8 +1036,9 @@ diffKeyedElementDeferred' mounted plan plan' old@(elementHost -> Just e) mid new
 --       Remaining cases are:
 --          swap where three actions are added to the plan rather than one
 --          2+ 2+/insert nk0 where insert is immediately followed by diff
+{-# INLINE diffKeyedChildrenDeferred #-}
 diffKeyedChildrenDeferred :: forall s. Element -> IORef [IO ()] -> Plan s -> Plan s -> [(Int,View)] -> [(Int,View)] -> [(Int,View)] -> ST s [(Int,View)]
-diffKeyedChildrenDeferred e mounted plan plan' olds mids news = do
+diffKeyedChildrenDeferred e mounted plan plan' olds !mids !news = do
   case reallyUnsafePtrEquality# mids news of
     1# -> return olds
     _  -> diffKeyedChildrenDeferred' e mounted plan plan' olds mids news
@@ -1037,6 +1081,7 @@ diffKeyedChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
         go' :: Removals s -> Int -> DiffST s [(Int,View)]
         go' = go
 
+        {-# INLINE go #-}
         go :: Removals s -> Int -> DiffST s [(Int,View)]
         go _ _ olds mids news
           | isTrue# (reallyUnsafePtrEquality# mids news) = pure olds
