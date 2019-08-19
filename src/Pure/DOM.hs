@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, OverloadedStrings, RankNTypes, ScopedTypeVariables, PatternSynonyms, ViewPatterns, MagicHash, RecordWildCards, BangPatterns, LambdaCase #-}
-module Pure.DOM where
+module Pure.DOM (inject) where
 
 -- from base
 import Control.Concurrent (MVar,newEmptyMVar,putMVar,takeMVar,yield,forkIO)
@@ -190,7 +190,7 @@ build mtd = start
           for_ mparent (`append` e)
           return $ HTMLView (Just e) tag fs cs
         go (SomeView r) = go' (view r)
-        go (ComponentView witness props _ comp) = do
+        go (ComponentView witness _ comp props) = do
           stq_   <- newIORef . Just =<< newQueue
           props_ <- newIORef props
           state_ <- newIORef undefined
@@ -208,7 +208,7 @@ build mtd = start
           writeIORef live_ live
           modifyIORef' mtd ((mounted c):)
           addIdleWork $ void $ forkIO $ newComponentThread cr c live new props state2
-          return $ ComponentView witness props (Just cr) comp
+          return $ ComponentView witness (Just cr) comp props
         go (LazyView f a) = go' (f a)
         go TextView {..} = do
           tn <- createText content
@@ -585,16 +585,16 @@ diffDeferred mounted plan plan' old !mid !new =
             | otherwise -> 
               diffDeferred' mounted plan plan' old (f a) (f' a')
 
-          (ComponentView t p _ v,ComponentView t' p' _ v') ->
+          (ComponentView t _ v p,ComponentView t' _ v' p') ->
             case old of
-              ComponentView _ _ (Just r0) _
+              ComponentView _ (Just r0) _ _
                 | sameTypeWitness t t' ->
                   case unsafeCoerce# reallyUnsafePtrEquality# p p' of
                     1# -> return old
                     _  -> do
                           let r = unsafeCoerce# r0
                           unsafeIOToST $ setProps r p'
-                          return (ComponentView t' p' (Just r) v')
+                          return (ComponentView t' (Just r) v' p')
                 | otherwise -> unsafeIOToST $ do
                   mtd <- newIORef []
                   new' <- build mtd Nothing new
