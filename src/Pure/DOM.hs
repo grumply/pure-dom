@@ -636,7 +636,7 @@ diffDeferred mounted plan plan' old !mid !new =
 
           (PortalView{},PortalView{})
             | same (toJSV (portalDestination old)) (toJSV (portalDestination new)) -> do
-              v <- diffElementDeferred mounted plan plan' (portalView old) (portalView mid) (portalView new)
+              v <- diffDeferred' mounted plan plan' (portalView old) (portalView mid) (portalView new)
               return old { portalView = v }
             | otherwise -> do
               built@(getHost -> Just h) <- unsafeIOToST (build mounted Nothing (portalView new))
