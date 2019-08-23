@@ -11,8 +11,8 @@ import Data.Coerce (coerce)
 import Data.Foldable (for_,traverse_)
 import Data.Function (fix)
 import Data.IORef (IORef,newIORef,modifyIORef',readIORef,writeIORef)
-import Data.List as List (null,reverse,filter)
-import Data.Maybe (fromJust)
+import Data.List as List (null,reverse,filter,length)
+import Data.Maybe (fromJust,isJust)
 import Data.STRef (STRef,newSTRef,readSTRef,modifySTRef',writeSTRef)
 import Data.Traversable (for,traverse)
 import Data.Typeable (Typeable)
@@ -206,7 +206,7 @@ build mtd = start
           let new = render c props state2
           live <- go' new
           writeIORef live_ live
-          modifyIORef' mtd ((mounted c):)
+          modifyIORef' mtd (mounted c:)
           addIdleWork $ void $ forkIO $ newComponentThread cr c live new props state2
           return $ ComponentView witness (Just cr) comp props
         go (LazyView f a) = go' (f a)
@@ -585,21 +585,24 @@ diffDeferred mounted plan plan' old !mid !new =
             | otherwise -> 
               diffDeferred' mounted plan plan' old (f a) (f' a')
 
-          (ComponentView t _ v p,ComponentView t' _ v' p') ->
-            case old of
-              ComponentView _ (Just r0) _ _
-                | sameTypeWitness t t' ->
-                  case unsafeCoerce# reallyUnsafePtrEquality# p p' of
-                    1# -> return old
-                    _  -> do
-                          let r = unsafeCoerce# r0
-                          unsafeIOToST $ setProps r p'
-                          return (ComponentView t' (Just r) v' p')
-                | otherwise -> unsafeIOToST $ do
-                  mtd <- newIORef []
-                  new' <- build mtd Nothing new
-                  queueComponentUpdate r0 (Unmount (Just new') (readIORef mtd >>= runPlan))
-                  return new'
+          (ComponentView t _ v p,ComponentView t' _ v' p')
+            | ComponentView _ (Just r0) _ _ <- old 
+            , sameTypeWitness t t' ->
+              case unsafeCoerce# reallyUnsafePtrEquality# p p' of
+                1# -> return old
+                _  -> do
+                      let r = unsafeCoerce# r0
+                      unsafeIOToST $ setProps r p'
+                      return (ComponentView t' (Just r) v' p')
+
+          (ComponentView _ _ _ _,_)
+            | ComponentView _ (Just r0) _ _ <- old -> do
+              new' <- unsafeIOToST (build mounted Nothing new)
+              amendPlan plan $ do
+                old <- readIORef (crView r0)
+                replaceNode (fromJust $ getHost old) (fromJust $ getHost new')
+                void $ queueComponentUpdate r0 (Unmount Nothing (pure ()))
+              return new'
 
           (HTMLView{},HTMLView{})
             | cmpTag -> diffElementDeferred mounted plan plan' old mid new
@@ -976,7 +979,7 @@ removeDeferred plan plan' v = do
   amendPlan plan' (cleanup v)
 
 replaceDeferred :: Plan s -> Plan s -> View -> View -> ST s View
-replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) =
+replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) = do
   case oldHost of
     Nothing -> error "Expected old host in replaceDeferred; got nothing."
     Just oh ->
@@ -1171,4 +1174,3 @@ diffKeyedChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
           n' <- unsafeIOToST (build mounted Nothing new)
           ins (getHost n')
           return (nk,n')
-
