@@ -346,7 +346,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
   where
     {-# NOINLINE loop' #-}
     loop' :: Bool -> View -> View -> props -> state -> IO ()
-    loop' = loop -- loopbreaker
+    loop' = loop
 
     {-# INLINE loop #-}
     loop :: Bool -> View -> View -> props -> state -> IO ()
@@ -356,8 +356,9 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
       where
         {-# NOINLINE go' #-}
         go' :: props -> state -> [(IO (),IO (),IO ())] -> [ComponentPatch props state] -> IO ()
-        go' = go -- loopbreaker
+        go' = go
 
+        {-# INLINE go #-}
         go :: props -> state -> [(IO (),IO (),IO ())] -> [ComponentPatch props state] -> IO ()
         go newProps newState = go1
           where
@@ -389,7 +390,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                 hasAnimations = not (List.null plan)
                 hasIdleWork   = not (List.null plan')
 
-              mounts <- readIORef mtd
+              mounts <- plan `seq` plan' `seq` readIORef mtd
 
               if hasAnimations && hasIdleWork then do
                 let !a = runPlan plan
