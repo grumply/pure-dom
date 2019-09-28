@@ -6,7 +6,7 @@ import Control.Concurrent (MVar,newEmptyMVar,putMVar,takeMVar,yield,forkIO)
 import Control.Exception (SomeException,catch)
 import Control.Monad.ST (ST,runST)
 import Control.Monad.ST.Unsafe (unsafeIOToST)
-import Control.Monad (void,unless,join,when,(>=>))
+import Control.Monad (void,unless,join,when,(>=>),forM_)
 import Data.Coerce (coerce)
 import Data.Foldable (for_,traverse_)
 import Data.Function (fix)
@@ -341,20 +341,18 @@ awaitComponentPatches pq = do
 
 {-# NOINLINE newComponentThread #-}
 newComponentThread :: forall props state. Ref props state -> Comp props state -> View -> View -> props -> state -> IO ()
-newComponentThread ref@Ref {..} comp@Comp {..} = \live view props -> 
-  executing >=> loop live view props
+newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state -> 
+  executing state >>= \st -> loop (not $ isTrue# (reallyUnsafePtrEquality# state st)) live view props st
   where
     {-# NOINLINE loop' #-}
-    loop' :: View -> View -> props -> state -> IO ()
+    loop' :: Bool -> View -> View -> props -> state -> IO ()
     loop' = loop -- loopbreaker
 
     {-# INLINE loop #-}
-    loop :: View -> View -> props -> state -> IO ()
-    loop !old !mid !props !state = do
-      mps <- awaitComponentPatches crPatchQueue
-      case mps of
-        Nothing  -> return ()
-        Just cps -> go props state [] cps
+    loop :: Bool -> View -> View -> props -> state -> IO ()
+    loop !first !old !mid !props !state = do
+      mps <- if first then pure (Just []) else awaitComponentPatches crPatchQueue
+      forM_ mps (go props state [])
       where
         {-# NOINLINE go' #-}
         go' :: props -> state -> [(IO (),IO (),IO ())] -> [ComponentPatch props state] -> IO ()
@@ -376,6 +374,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props ->
                 sameState = isTrue# (reallyUnsafePtrEquality# state newState)
 
                 new
+                  | first = render props state
                   | sameProps && sameState = mid
                   | sameProps = render props newState
                   | sameState = render newProps state
@@ -384,8 +383,8 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props ->
                 sameView = isTrue# (reallyUnsafePtrEquality# mid new)
 
                 (plan,plan',new_old)
-                  | sameView  = ([],[],old)
-                  | otherwise = buildPlan $ \p p' -> diffDeferred mtd p p' old mid new
+                  | first || not sameView = buildPlan $ \p p' -> diffDeferred mtd p p' old mid new
+                  | otherwise = ([],[],old)
 
                 hasAnimations = not (List.null plan)
                 hasIdleWork   = not (List.null plan')
@@ -426,7 +425,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props ->
               sequence_ after
 
               yield
-              loop' new_old new newProps newState
+              loop' False new_old new newProps newState
 
 
             go1 acc (cp:cps) =
