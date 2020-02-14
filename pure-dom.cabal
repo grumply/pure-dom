@@ -1,25 +1,29 @@
 name:                pure-dom
 version:             0.7.0.0
-synopsis:
-homepage:            github.com/grumply/pure-dom
+synopsis:            Injection and management of DOM nodes backed by Pure views
+homepage:            purehs.org/doc/pure-dom
 license:             BSD3
 license-file:        LICENSE
-author:              Sean Mackenzie
-maintainer:          sean@grump.ly
+author:              Sean Hickman
+maintainer:          sean@grumply.com
 category:            Web
 build-type:          Simple
 cabal-version:       >=1.10
 
+source-repository head
+  type: git
+  location: https://github.com/grumply/pure-dom.git
+
 library
   build-depends:
-    base >= 4.8 && < 5,
-    containers >= 0.5 && < 0.6,
-    pure-core >= 0.7 && < 1,
-    pure-default >= 0.7 && < 1,
-    pure-json >= 0.7 && < 1,
-    pure-lifted >= 0.7 && < 1,
-    pure-txt >= 0.7 && < 1,
-    pure-queue >= 0.7 && < 1
+    base,
+    containers,
+    pure-core,
+    pure-default,
+    pure-json,
+    pure-lifted,
+    pure-txt,
+    pure-queue
 
   hs-source-dirs: src
 
