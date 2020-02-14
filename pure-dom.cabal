@@ -1,5 +1,5 @@
 name:                pure-dom
-version:             0.7.0.0
+version:             0.8.0.0
 synopsis:            Injection and management of DOM nodes backed by Pure views
 homepage:            purehs.org/doc/pure-dom
 license:             BSD3
