@@ -210,6 +210,9 @@ build mtd = start
           addIdleWork $ void $ forkIO $ newComponentThread cr c live new props state2
           return $ ComponentView witness (Just cr) comp props
         go (LazyView f a) = go' (f a)
+        go TaggedView{..} = do
+          v <- go' taggedView
+          return TaggedView { taggedView = v, .. }
         go TextView {..} = do
           tn <- createText content
           for_ mparent (`append` tn)
@@ -584,6 +587,10 @@ diffDeferred mounted plan plan' old !mid !new =
               return old
             | otherwise -> 
               diffDeferred' mounted plan plan' old (f a) (f' a')
+
+          (TaggedView t v,TaggedView t' v')
+            | sameTypeWitness t t' -> 
+              diffDeferred' mounted plan plan' old v v'
 
           (ComponentView t _ v p,ComponentView t' _ v' p')
             | ComponentView _ (Just r0) _ _ <- old 
