@@ -23,7 +23,7 @@ import Unsafe.Coerce (unsafeCoerce)
 -- from containers
 import Data.Map (Map)
 import Data.Set (Set)
-import qualified Data.Map.Strict as Map (fromList,toList,insert,difference,keys,differenceWith,null)
+import qualified Data.Map.Lazy as Map (fromList,toList,insert,difference,keys,differenceWith,null,elems,mergeWithKey,mapWithKey)
 import qualified Data.Set as Set (fromList,toList,insert,delete,null)
 
 -- from pure-core
@@ -445,7 +445,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
 
                       buildPlan $ \plan plan' ->
                         maybe
-                          (amendPlan plan' (cleanup old))
+                          (cleanupDeferred plan' old)
                           (void . replaceDeferred plan plan' old)
                           mv
 
@@ -557,6 +557,39 @@ cleanup KSVGView {..} = do
   for_ keyedChildren (cleanup' . snd)
 cleanup _ = return ()
 
+cleanupDeferred :: Plan s -> View -> ST s ()
+cleanupDeferred plan v = do
+  xs <- go' v
+  case xs of
+    [] -> pure ()
+    _  -> amendPlan plan (sequence_ xs)
+  where
+    {-# NOINLINE go' #-}
+    go' = go
+
+    {-# INLINE go #-}
+    go RawView {..} =
+      return $ fmap cleanupListener (listeners features)
+    go HTMLView {..} = do
+      cs <- for children go'
+      return $ fmap cleanupListener (listeners features) ++ concat cs
+    go SVGView {..} = do
+      cs <- for children go'
+      return $ fmap cleanupListener (listeners features) ++ concat cs
+    go ComponentView {..} = do
+      unsafeIOToST $
+        for_ record (\r -> queueComponentUpdate r (Unmount Nothing (return ())))
+      pure []
+    go PortalView {..} =
+      go' portalView
+    go KHTMLView {..} = do
+      cs <- for (fmap snd keyedChildren) go'
+      return $ fmap cleanupListener (listeners features)  ++ concat cs
+    go KSVGView {..} = do
+      cs <- for (fmap snd keyedChildren) go'
+      return $ fmap cleanupListener (listeners features)  ++ concat cs
+    go _ = pure []
+
 {-# NOINLINE diffDeferred' #-}
 diffDeferred' :: forall s. IORef [IO ()] -> Plan s -> Plan s -> View -> View -> View -> ST s View
 diffDeferred' = diffDeferred
@@ -582,9 +615,8 @@ diffDeferred mounted plan plan' old !mid !new =
       in
         case (mid,new) of
           (LazyView f a,LazyView f' a')
-            | isTrue# (unsafeCoerce# reallyUnsafePtrEquality# f f')
-            , isTrue# (unsafeCoerce# reallyUnsafePtrEquality# a a') -> 
-              return old
+            |  isTrue# (unsafeCoerce# reallyUnsafePtrEquality# a a') 
+            -> return old
             | otherwise -> 
               diffDeferred' mounted plan plan' old (f a) (f' a')
 
@@ -650,7 +682,7 @@ diffDeferred mounted plan plan' old !mid !new =
               return old { portalView = v }
             | otherwise -> do
               built@(getHost -> Just h) <- unsafeIOToST (build mounted Nothing (portalView new))
-              amendPlan plan' (cleanup old)
+              cleanupDeferred plan' old
               amendPlan plan $ do
                 for_ (getHost (portalView old)) removeNode
                 append (toNode $ portalDestination new) h
@@ -665,7 +697,7 @@ diffDeferred mounted plan plan' old !mid !new =
             return (PortalView (fmap coerce $ getHost proxy) (portalDestination new) built)
 
           (PortalView{},_) -> do
-            amendPlan plan (cleanup old)
+            cleanupDeferred plan' old
             amendPlan plan $ for_ (getHost (portalView old)) removeNode
             replace
 
@@ -696,7 +728,7 @@ diffSVGElementDeferred  mounted plan plan' old !mid !new =
     _  -> diffSVGElementDeferred' mounted plan plan' old mid new
 
 diffSVGElementDeferred' :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
-diffSVGElementDeferred' mounted plan plan' old@(elementHost -> Just e) !mid !new = do
+diffSVGElementDeferred' mounted plan plan' old@(elementHost -> Just e) mid new = do
   unsafeIOToST yield_
   diffXLinksDeferred e plan (xlinks mid) (xlinks new)
   fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
@@ -732,16 +764,20 @@ diffXLinksDeferred e p !mid !new =
 
 diffXLinksDeferred' :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
 diffXLinksDeferred' e p mid new = do
+  let r = diffXLinkMaps mid new
+  amendPlan p $! sequence_ (fmap ($ e) r)
 
-      let remove = removeAttributeNS e "http://www.w3.org/1999/xlink"
-          removals = Map.keys (Map.difference mid new)
-          r = traverse_ remove removals
-      amendPlan p r
-
-      let add (k,v) = setAttributeNS e "http://www.w3.org/1999/xlink" k v
-          adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
-          a = traverse_ add adds
-      amendPlan p a
+diffXLinkMaps :: Map Txt Txt -> Map Txt Txt -> Map Txt (Element -> IO ())
+diffXLinkMaps = Map.mergeWithKey diff remove add
+  where
+      diff nm val1 val2 
+        | b <- isTrue# (reallyUnsafePtrEquality# val1 val2) 
+        , c <- val1 == val2 
+        , b || c
+        = Nothing
+        | otherwise = Just $ \e -> setAttributeNS e "http://www.w3.org/1999/xlink" nm val2
+      remove = Map.mapWithKey (\k _ -> (\e -> removeAttributeNS e "http://www.w3.org/1999/xlink" k))
+      add = Map.mapWithKey (\k v -> \e -> setAttributeNS e "http://www.w3.org/1999/xlink" k v)
 
 {-# INLINE diffClassesDeferred #-}
 diffClassesDeferred :: Element -> Plan s -> Set Txt -> Set Txt -> ST s ()
@@ -767,16 +803,20 @@ diffStylesDeferred e p !mid !new =
 
 diffStylesDeferred' :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
 diffStylesDeferred' e p mid new = do
+  let r = diffStyleMaps mid new
+  amendPlan p $! sequence_ (fmap ($ e) r)
 
-      let remove = removeStyle e
-          removes = Map.keys (Map.difference mid new)
-          r = traverse_ remove removes
-      amendPlan p r
-
-      let add (k,v) = setStyle e k v
-          adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
-          a = traverse_ add adds
-      amendPlan p a
+diffStyleMaps :: Map Txt Txt -> Map Txt Txt -> Map Txt (Element -> IO ())
+diffStyleMaps = Map.mergeWithKey diff remove add
+  where
+      diff nm val1 val2 
+        | b <- isTrue# (reallyUnsafePtrEquality# val1 val2) 
+        , c <- val1 == val2 
+        , b || c
+        = Nothing
+        | otherwise = Just $ \e -> setStyle e nm val2
+      remove = Map.mapWithKey (\k _ -> (\e -> removeStyle e k))
+      add = Map.mapWithKey (\k v -> \e -> setStyle e k v)
 
 {-# INLINE diffAttributesDeferred #-}
 diffAttributesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
@@ -787,16 +827,20 @@ diffAttributesDeferred e p !mid !new =
 
 diffAttributesDeferred' :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
 diffAttributesDeferred' e p mid new = do
+  let r = diffAttributeMaps mid new
+  amendPlan p $! sequence_ (fmap ($ e) r)
 
-      let remove = removeAttribute e
-          removes = Map.keys (Map.difference mid new)
-          r = traverse_ remove removes
-      amendPlan p r
-
-      let add (k,v) = setAttribute e k v
-          adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
-          a = traverse_ add adds
-      amendPlan p a
+diffAttributeMaps :: Map Txt Txt -> Map Txt Txt -> Map Txt (Element -> IO ())
+diffAttributeMaps = Map.mergeWithKey diff remove add
+  where
+      diff nm val1 val2 
+        | b <- isTrue# (reallyUnsafePtrEquality# val1 val2) 
+        , c <- val1 == val2 
+        , b || c
+        = Nothing
+        | otherwise = Just $ \e -> setAttribute e nm val2
+      remove = Map.mapWithKey (\k _ -> (\e -> removeAttribute e k))
+      add = Map.mapWithKey (\k v -> \e -> setAttribute e k v)
 
 {-# INLINE diffPropertiesDeferred #-}
 diffPropertiesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
@@ -807,16 +851,20 @@ diffPropertiesDeferred e p !mid !new =
 
 diffPropertiesDeferred' :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
 diffPropertiesDeferred' e p mid new = do
+  let r = diffPropertyMaps mid new
+  amendPlan p $! sequence_ (fmap ($ e) r)
 
-      let remove = removeProperty e
-          removes = Map.keys (Map.difference mid new)
-          r = traverse_ remove removes
-      amendPlan p r
-
-      let add (k,v) = setProperty e k v
-          adds = Map.toList $ Map.differenceWith (\a b -> if a /= b then Just a else Nothing) new mid
-          a = traverse_ add adds
-      amendPlan p a
+diffPropertyMaps :: Map Txt Txt -> Map Txt Txt -> Map Txt (Element -> IO ())
+diffPropertyMaps = Map.mergeWithKey diff remove add
+  where
+      diff nm val1 val2 
+        | b <- isTrue# (reallyUnsafePtrEquality# val1 val2) 
+        , c <- val1 == val2 
+        , b || c
+        = Nothing
+        | otherwise = Just $ \e -> setProperty e nm val2
+      remove = Map.mapWithKey (\k _ -> (\e -> removeProperty e k))
+      add = Map.mapWithKey (\k v -> \e -> setProperty e k v)
 
 addListenerDeferred :: Element -> Plan s -> Listener -> ST s Listener
 addListenerDeferred e plan l@(On n t o a _) = do
@@ -944,7 +992,7 @@ diffChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
     -- 1+ 0
     (_,[]) -> do
       amendPlan plan (clearNode e)
-      amendPlan plan' (for_ olds cleanup)
+      for_ olds (cleanupDeferred plan')
       return []
 
     -- 1+ 1+
@@ -978,12 +1026,12 @@ diffChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
 removeManyDeferred :: Plan s -> Plan s -> [View] -> ST s ()
 removeManyDeferred plan plan' vs = do
   amendPlan plan  (for_ vs (traverse_ removeNodeMaybe . getHost))
-  amendPlan plan' (for_ vs cleanup)
+  for_ vs (cleanupDeferred plan')
 
 removeDeferred :: Plan s -> Plan s -> View -> ST s ()
 removeDeferred plan plan' v = do
   for_ (getHost v) (amendPlan plan . removeNodeMaybe)
-  amendPlan plan' (cleanup v)
+  cleanupDeferred plan' v
 
 replaceDeferred :: Plan s -> Plan s -> View -> View -> ST s View
 replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) = do
@@ -994,7 +1042,7 @@ replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) = d
         Nothing -> error "Expected new host in replaceDeferred; got nothing."
         Just nh -> do
           amendPlan plan (replaceNode oh nh)
-          amendPlan plan' (cleanup old)
+          cleanupDeferred plan' old
           return new
 
 replaceTextContentDeferred :: Plan s -> View -> View -> ST s View
@@ -1070,7 +1118,7 @@ diffKeyedChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
     -- 1+ 0
     (_,[]) -> do
       amendPlan plan (clearNode e)
-      amendPlan plan' (for_ (fmap snd olds) cleanup)
+      for_ (fmap snd olds) (cleanupDeferred plan')
       return []
 
     -- 1+ 1+
