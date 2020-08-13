@@ -125,7 +125,8 @@ buildPlan f = runST $ do
   a  <- f p p'
   p  <- readSTRef p
   p' <- readSTRef p'
-  return (p,p',a)
+  List.length p `seq` List.length p' `seq`
+    return (p,p',a)
 
 {-# INLINE amendPlan #-}
 amendPlan :: Plan s -> IO () -> ST s ()
@@ -393,7 +394,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                 hasAnimations = not (List.null plan)
                 hasIdleWork   = not (List.null plan')
 
-              mounts <- plan `seq` plan' `seq` readIORef mtd
+              mounts <- readIORef mtd
 
               if hasAnimations && hasIdleWork then do
                 let !a = runPlan plan
@@ -449,8 +450,8 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                           (void . replaceDeferred plan plan' old)
                           mv
 
-                    hasAnimations = not $ List.null plan
-                    hasIdleWork   = not $ List.null plan'
+                    hasAnimations = not (List.null plan)
+                    hasIdleWork = not (List.null plan')
 
                   if hasAnimations && hasIdleWork
                     then do
@@ -480,7 +481,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
 
                   writeIORef crProps (error "ask: Component invalidated.")
                   writeIORef crState (error "get: Component invalidated.")
-                  writeIORef crView  (error "look: Component invalidated.")
+                  writeIORef crView  (NullView Nothing)
                   mtd
 
                 UpdateProperties newProps' -> do
@@ -1025,7 +1026,7 @@ diffChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
 
 removeManyDeferred :: Plan s -> Plan s -> [View] -> ST s ()
 removeManyDeferred plan plan' vs = do
-  amendPlan plan  (for_ vs (traverse_ removeNodeMaybe . getHost))
+  amendPlan plan (for_ vs (traverse_ removeNodeMaybe . getHost))
   for_ vs (cleanupDeferred plan')
 
 removeDeferred :: Plan s -> Plan s -> View -> ST s ()
