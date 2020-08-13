@@ -452,36 +452,35 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                     hasAnimations = not (List.null plan)
                     hasIdleWork = not (List.null plan')
 
-                  plan `seq` plan' `seq`
-                    if hasAnimations && hasIdleWork
-                      then do
+                  if hasAnimations && hasIdleWork
+                    then do
+                      let !a = runPlan plan
+                          !i = runPlan plan'
+                      sync $ \barrier ->
+                        addAnimationsReverse
+                          [ putMVar barrier ()
+                          , void (addIdleWork i) 
+                          , a
+                          ]
+
+                    else do
+
+                      when hasAnimations $ do
                         let !a = runPlan plan
-                            !i = runPlan plan'
+
                         sync $ \barrier ->
                           addAnimationsReverse
                             [ putMVar barrier ()
-                            , void (addIdleWork i) 
                             , a
                             ]
 
-                      else do
-
-                        when hasAnimations $ do
-                          let !a = runPlan plan
-
-                          sync $ \barrier ->
-                            addAnimationsReverse
-                              [ putMVar barrier ()
-                              , a
-                              ]
-
-                        when hasIdleWork $ void $ do
-                          let !i = runPlan plan'
-                          addIdleWork i
+                      when hasIdleWork $ void $ do
+                        let !i = runPlan plan'
+                        addIdleWork i
 
                   writeIORef crProps (error "ask: Component invalidated.")
                   writeIORef crState (error "get: Component invalidated.")
-                  writeIORef crView  (NullView Nothing)
+                  writeIORef crView  (error "look: Component invalidated.")
                   mtd
 
                 UpdateProperties newProps' -> do
