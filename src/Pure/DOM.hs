@@ -23,7 +23,7 @@ import Unsafe.Coerce (unsafeCoerce)
 -- from containers
 import Data.Map (Map)
 import Data.Set (Set)
-import qualified Data.Map.Lazy as Map (fromList,toList,insert,difference,keys,differenceWith,null,elems,mergeWithKey,mapWithKey)
+import qualified Data.Map.Strict as Map (fromList,toList,insert,difference,keys,differenceWith,null,elems,mergeWithKey,mapWithKey)
 import qualified Data.Set as Set (fromList,toList,insert,delete,null)
 
 -- from pure-core
@@ -125,8 +125,7 @@ buildPlan f = runST $ do
   a  <- f p p'
   p  <- readSTRef p
   p' <- readSTRef p'
-  List.length p `seq` List.length p' `seq`
-    return (p,p',a)
+  return (p,p',a)
 
 {-# INLINE amendPlan #-}
 amendPlan :: Plan s -> IO () -> ST s ()
@@ -394,7 +393,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                 hasAnimations = not (List.null plan)
                 hasIdleWork   = not (List.null plan')
 
-              mounts <- readIORef mtd
+              mounts <- plan `seq` plan' `seq` readIORef mtd
 
               if hasAnimations && hasIdleWork then do
                 let !a = runPlan plan
@@ -446,38 +445,39 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
 
                       buildPlan $ \plan plan' ->
                         maybe
-                          (cleanupDeferred plan' old)
+                          (amendPlan plan' (cleanup old))
                           (void . replaceDeferred plan plan' old)
                           mv
 
                     hasAnimations = not (List.null plan)
                     hasIdleWork = not (List.null plan')
 
-                  if hasAnimations && hasIdleWork
-                    then do
-                      let !a = runPlan plan
-                          !i = runPlan plan'
-                      sync $ \barrier ->
-                        addAnimationsReverse
-                          [ putMVar barrier ()
-                          , void (addIdleWork i) 
-                          , a
-                          ]
-
-                    else do
-
-                      when hasAnimations $ do
+                  plan `seq` plan' `seq`
+                    if hasAnimations && hasIdleWork
+                      then do
                         let !a = runPlan plan
-
+                            !i = runPlan plan'
                         sync $ \barrier ->
                           addAnimationsReverse
                             [ putMVar barrier ()
+                            , void (addIdleWork i) 
                             , a
                             ]
 
-                      when hasIdleWork $ void $ do
-                        let !i = runPlan plan'
-                        addIdleWork i
+                      else do
+
+                        when hasAnimations $ do
+                          let !a = runPlan plan
+
+                          sync $ \barrier ->
+                            addAnimationsReverse
+                              [ putMVar barrier ()
+                              , a
+                              ]
+
+                        when hasIdleWork $ void $ do
+                          let !i = runPlan plan'
+                          addIdleWork i
 
                   writeIORef crProps (error "ask: Component invalidated.")
                   writeIORef crState (error "get: Component invalidated.")
@@ -557,39 +557,6 @@ cleanup KSVGView {..} = do
   for_ (listeners features) cleanupListener
   for_ keyedChildren (cleanup' . snd)
 cleanup _ = return ()
-
-cleanupDeferred :: Plan s -> View -> ST s ()
-cleanupDeferred plan v = do
-  xs <- go' v
-  case xs of
-    [] -> pure ()
-    _  -> amendPlan plan (sequence_ xs)
-  where
-    {-# NOINLINE go' #-}
-    go' = go
-
-    {-# INLINE go #-}
-    go RawView {..} =
-      return $ fmap cleanupListener (listeners features)
-    go HTMLView {..} = do
-      cs <- for children go'
-      return $ fmap cleanupListener (listeners features) ++ concat cs
-    go SVGView {..} = do
-      cs <- for children go'
-      return $ fmap cleanupListener (listeners features) ++ concat cs
-    go ComponentView {..} = do
-      unsafeIOToST $
-        for_ record (\r -> queueComponentUpdate r (Unmount Nothing (return ())))
-      pure []
-    go PortalView {..} =
-      go' portalView
-    go KHTMLView {..} = do
-      cs <- for (fmap snd keyedChildren) go'
-      return $ fmap cleanupListener (listeners features)  ++ concat cs
-    go KSVGView {..} = do
-      cs <- for (fmap snd keyedChildren) go'
-      return $ fmap cleanupListener (listeners features)  ++ concat cs
-    go _ = pure []
 
 {-# NOINLINE diffDeferred' #-}
 diffDeferred' :: forall s. IORef [IO ()] -> Plan s -> Plan s -> View -> View -> View -> ST s View
@@ -683,7 +650,7 @@ diffDeferred mounted plan plan' old !mid !new =
               return old { portalView = v }
             | otherwise -> do
               built@(getHost -> Just h) <- unsafeIOToST (build mounted Nothing (portalView new))
-              cleanupDeferred plan' old
+              amendPlan plan' (cleanup old)
               amendPlan plan $ do
                 for_ (getHost (portalView old)) removeNode
                 append (toNode $ portalDestination new) h
@@ -698,7 +665,7 @@ diffDeferred mounted plan plan' old !mid !new =
             return (PortalView (fmap coerce $ getHost proxy) (portalDestination new) built)
 
           (PortalView{},_) -> do
-            cleanupDeferred plan' old
+            amendPlan plan' (cleanup old)
             amendPlan plan $ for_ (getHost (portalView old)) removeNode
             replace
 
@@ -993,7 +960,7 @@ diffChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
     -- 1+ 0
     (_,[]) -> do
       amendPlan plan (clearNode e)
-      for_ olds (cleanupDeferred plan')
+      amendPlan plan' (for_ olds cleanup)
       return []
 
     -- 1+ 1+
@@ -1027,12 +994,12 @@ diffChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
 removeManyDeferred :: Plan s -> Plan s -> [View] -> ST s ()
 removeManyDeferred plan plan' vs = do
   amendPlan plan (for_ vs (traverse_ removeNodeMaybe . getHost))
-  for_ vs (cleanupDeferred plan')
+  amendPlan plan' (for_ vs cleanup)
 
 removeDeferred :: Plan s -> Plan s -> View -> ST s ()
 removeDeferred plan plan' v = do
   for_ (getHost v) (amendPlan plan . removeNodeMaybe)
-  cleanupDeferred plan' v
+  amendPlan plan' (cleanup v)
 
 replaceDeferred :: Plan s -> Plan s -> View -> View -> ST s View
 replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) = do
@@ -1043,7 +1010,7 @@ replaceDeferred plan plan' old@(getHost -> oldHost) new@(getHost -> newHost) = d
         Nothing -> error "Expected new host in replaceDeferred; got nothing."
         Just nh -> do
           amendPlan plan (replaceNode oh nh)
-          cleanupDeferred plan' old
+          amendPlan plan' (cleanup old)
           return new
 
 replaceTextContentDeferred :: Plan s -> View -> View -> ST s View
@@ -1119,7 +1086,7 @@ diffKeyedChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
     -- 1+ 0
     (_,[]) -> do
       amendPlan plan (clearNode e)
-      for_ (fmap snd olds) (cleanupDeferred plan')
+      amendPlan plan' (for_ (fmap snd olds) cleanup)
       return []
 
     -- 1+ 1+
