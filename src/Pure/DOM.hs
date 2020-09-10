@@ -756,10 +756,10 @@ diffClassesDeferred e p !mid !new =
 diffClassesDeferred' :: Element -> Plan s -> Set Txt -> Set Txt -> ST s ()
 diffClassesDeferred' e p mid new
   | Set.null mid && Set.null new = return ()
-  | Set.null new = amendPlan p (removeProperty e "className")
+  | Set.null new = amendPlan p (removeAttribute e "class")
   | otherwise =
     let cs = Txt.intercalate " " $ Set.toList $ Set.delete "" new
-    in amendPlan p (setProperty e "className" cs)
+    in amendPlan p (setAttribute e "class" cs)
 
 {-# INLINE diffStylesDeferred #-}
 diffStylesDeferred :: Element -> Plan s -> Map Txt Txt -> Map Txt Txt -> ST s ()
