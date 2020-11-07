@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, OverloadedStrings, RankNTypes, ScopedTypeVariables, PatternSynonyms, ViewPatterns, MagicHash, RecordWildCards, BangPatterns, LambdaCase #-}
-module Pure.DOM (inject) where
+module Pure.DOM (inject,prebuild) where
 
 -- from base
 import Control.Concurrent (MVar,newEmptyMVar,putMVar,takeMVar,yield,forkIO)
@@ -163,8 +163,17 @@ yield_ =
 inject :: IsNode e => e -> View -> IO ()
 inject host v = do
   mtd <- newIORef []
-  build mtd (Just $ toNode host) v
+  build' mtd (Just $ toNode host) v
   runPlan =<< readIORef mtd
+
+-- | Pre-build a view for later use.
+{-# INLINE prebuild #-}
+prebuild :: View -> IO View
+prebuild v = do
+  mtd <- newIORef []
+  !v' <- build' mtd Nothing v
+  runPlan =<< readIORef mtd
+  pure (Prebuilt v')
 
 {-# NOINLINE build' #-}
 build' :: IORef [IO ()] -> Maybe Node -> View -> IO View
@@ -172,16 +181,28 @@ build' = build
 
 {-# INLINE build #-}
 build :: IORef [IO ()] -> Maybe Node -> View -> IO View
-build mtd = start
+build mtd = start'
   where
     {-# NOINLINE start' #-}
     start' = start
+
     {-# INLINE start #-}
-    start mparent = go
+    start mparent = go'
       where
         {-# NOINLINE go' #-}
         go' = go
+
         {-# INLINE go #-}
+        go (Prebuilt v) = 
+          case mparent of
+            Nothing -> pure (Prebuilt v)
+            Just p  -> do
+              case getHost v of
+                Just h -> do
+                  append p h
+                  pure (Prebuilt v)
+                Nothing -> 
+                  error "Pure.DOM.build: Invalid Prebuilt View. No host node found."
         go HTMLView {..} = do
           e <- create tag
           let n = Just (toNode e)
@@ -555,6 +576,8 @@ cleanup KHTMLView {..} = do
 cleanup KSVGView {..} = do
   for_ (listeners features) cleanupListener
   for_ keyedChildren (cleanup' . snd)
+cleanup Prebuilt {..} = do
+  cleanup' prebuilt
 cleanup _ = return ()
 
 {-# NOINLINE diffDeferred' #-}
@@ -581,6 +604,9 @@ diffDeferred mounted plan plan' old !mid !new =
           cmpTag = sameTag || tag mid == tag new
       in
         case (mid,new) of
+          (Prebuilt pb,Prebuilt pb') -> 
+            diffDeferred' mounted plan plan' old pb pb'
+
           (LazyView f a,LazyView f' a')
             |  isTrue# (unsafeCoerce# reallyUnsafePtrEquality# a a') 
             -> return old
