@@ -193,25 +193,29 @@ build mtd = start'
         go' = go
 
         {-# INLINE go #-}
-        go (Prebuilt v) = 
+        go o@(Prebuilt v) = 
           case mparent of
             Nothing -> pure (Prebuilt v)
             Just p  -> do
               case getHost v of
                 Just h -> do
                   append p h
-                  pure (Prebuilt v)
+                  pure o 
                 Nothing -> 
                   error "Pure.DOM.build: Invalid Prebuilt View. No host node found."
-        go HTMLView {..} = do
+        go o@HTMLView {..} = do
           e <- create tag
           let n = Just (toNode e)
           fs <- setFeatures mtd e features
           cs <- traverse (start' n) children
           for_ mparent (`append` e)
-          return $ HTMLView (Just e) tag fs cs
+          return o 
+            { elementHost = Just e
+            , features = fs
+            , children = cs 
+            }
         go (SomeView r) = go' (view r)
-        go (ComponentView witness _ comp props) = do
+        go o@(ComponentView witness _ comp props) = do
           stq_   <- newIORef . Just =<< newQueue
           props_ <- newIORef props
           state_ <- newIORef undefined
@@ -229,53 +233,70 @@ build mtd = start'
           writeIORef live_ live
           modifyIORef' mtd (mounted c:)
           addIdleWork $ void $ forkIO $ newComponentThread cr c live new props state2
-          return $ ComponentView witness (Just cr) comp props
+          -- GHC doesn't allow for record update of a ComponentView here
+          return (ComponentView witness (Just cr) comp props)
         go (LazyView f a) = go' (f a)
-        go TaggedView{..} = do
-          v <- go' taggedView
-          return TaggedView { taggedView = v, .. }
-        go TextView {..} = do
+        go TaggedView{..} = go' taggedView
+        go o@TextView {..} = do
           tn <- createText content
           for_ mparent (`append` tn)
-          pure $ TextView (Just tn) content
-        go NullView{} = do
+          pure o { textHost = Just tn }
+        go o@NullView{} = do
           e <- create "template"
           for_ mparent (`append` e)
-          pure $ NullView (Just e)
-        go RawView {..} = do
+          pure o { elementHost = Just e } 
+        go o@RawView {..} = do
           e <- create tag
           setInnerHTML e content
           fs <- setFeatures mtd e features
           for_ mparent (`append` e)
-          return $ RawView (Just e) tag fs content
-        go KHTMLView {..} = do
+          return o 
+            { elementHost = Just e
+            , features = fs
+            }
+        go o@KHTMLView {..} = do
           e <- create tag
           let n = Just (toNode e)
           fs <- setFeatures mtd e features
           cs <- traverse (traverse (start' n)) keyedChildren
           for_ mparent (`append` e)
-          return $ KHTMLView (Just e) tag fs cs
-        go SVGView {..} = do
+          return o
+            { elementHost = Just e
+            , features = fs
+            , keyedChildren = cs
+            }
+        go o@SVGView {..} = do
           e <- createNS "http://www.w3.org/2000/svg" tag
           let n = Just (toNode e)
           setXLinks e xlinks
           fs <- setFeatures mtd e features
           cs <- traverse (start' n) children
           for_ mparent (`append` e)
-          return $ SVGView (Just e) tag fs xlinks cs
-        go KSVGView {..} = do
+          return o 
+            { elementHost = Just e
+            , features = fs 
+            , children = cs
+            }
+        go o@KSVGView {..} = do
           e <- createNS "http://www.w3.org/2000/svg" tag
           let n = Just (toNode e)
           setXLinks e xlinks
           fs <- setFeatures mtd e features
           cs <- traverse (traverse (start' n)) keyedChildren
           for_ mparent (`append` e)
-          return $ KSVGView (Just e) tag fs xlinks cs
-        go PortalView{..} = do
+          return o
+            { elementHost = Just e
+            , features = fs
+            , keyedChildren = cs
+            }
+        go o@PortalView{..} = do
           e <- create "template"
           v <- start' (Just $ toNode portalDestination) portalView
           for_ mparent (`append` e)
-          return $ PortalView (Just e) portalDestination v
+          return o
+            { portalProxy = Just e
+            , portalView = v
+            }
 
 setXLinks :: Element -> Map Txt Txt -> IO ()
 setXLinks e = traverse_ (uncurry (setAttributeNS e "http://www.w3.org/1999/xlink")) . Map.toList
@@ -349,15 +370,15 @@ addListener e f@(On n t o a _) = do
       return (cb,stpr)
 
     addEventListener target n cb (passive o)
-    return (On n t o a stopper)
+    return f { eventStopper = stopper }
 #else
     return f
 #endif
 
 addLifecycle :: IORef [IO ()] -> Element -> Lifecycle -> IO Lifecycle
-addLifecycle mtd e (HostRef w) = do
+addLifecycle mtd e hr@(HostRef w) = do
   modifyIORef' mtd ((w (toNode e)):)
-  return (HostRef w)
+  return hr { withHost = w }
 
 awaitComponentPatches pq = do
   mpq <- readIORef pq
@@ -625,6 +646,7 @@ diffDeferred mounted plan plan' old !mid !new =
                 _  -> do
                       let r = unsafeCoerce# r0
                       unsafeIOToST $ setProps r p'
+                      -- GHC doesn't allow for record update of a ComponentView here
                       return (ComponentView t' (Just r) v' p')
 
           (ComponentView _ _ _ _,_)
@@ -679,7 +701,7 @@ diffDeferred mounted plan plan' old !mid !new =
               amendPlan plan $ do
                 for_ (getHost (portalView old)) removeNode
                 append (toNode $ portalDestination new) h
-              -- recycling the portalProxy
+              -- Recycling the portalProxy. Might lose some reference equality here?
               return (PortalView (portalProxy old) (portalDestination new) built)
 
           (_,PortalView{}) -> do
@@ -708,7 +730,7 @@ diffElementDeferred' mounted plan plan' old@(elementHost -> Just e) mid new = do
   unsafeIOToST yield_
   fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
   cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
-  return $ old
+  return old
     { features = fs
     , children = cs
     }
