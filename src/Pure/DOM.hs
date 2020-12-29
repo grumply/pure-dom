@@ -93,6 +93,7 @@ import Pure.Data.Lifted
 
   -- callbacks
 #ifdef __GHCJS__
+  ,asyncCallback1
   ,syncCallback1
   ,OnBlocked(..)
   ,releaseCallback
@@ -353,24 +354,32 @@ addListener e f@(On n t o a _) = do
                 ElementTarget  -> return (toJSV e)
                 WindowTarget   -> fmap toJSV getWindow
                 DocumentTarget -> fmap toJSV getDocument
-    (cb,stopper) <- do
+    stopper <- do
 
       stopper <- newIORef undefined
 
       let stpr = join $ readIORef stopper
 
-      cb <- syncCallback1 ContinueAsync $ \jsv -> do
-        when (preventDef o) (preventDefault jsv)
-        when (stopProp o) (stopPropagation jsv)
-        a (Evt jsv target stpr)
+      cb <- asyncCallback1 $ \jsv -> a (Evt jsv target stpr)
 
       writeIORef stopper $ do
         removeEventListener target n cb
         releaseCallback cb
 
-      return (cb,stpr)
+      addEventListener target n cb (passive o)
 
-    addEventListener target n cb (passive o)
+      when (preventDef o || stopProp o) $ do
+        cb' <- syncCallback1 ContinueAsync $ \jsv -> do
+          when (preventDef o) (preventDefault jsv)
+          when (stopProp o) (stopPropagation jsv)
+        addEventListener target n cb' True
+        modifyIORef' stopper $ \original -> do
+          original
+          removeEventListener target n cb'
+          releaseCallback cb'
+
+      return stpr
+
     return f { eventStopper = stopper }
 #else
     return f
@@ -591,7 +600,7 @@ cleanup SVGView {..} = do
 cleanup ComponentView {..} = do
   for_ record (\r -> queueComponentUpdate r (Unmount Nothing (return ())))
 cleanup PortalView {..} = do
-  for_ (getHost portalView) removeNodeMaybe
+  for_ (getHost portalView) (addAnimation . removeNodeMaybe)
   cleanup' portalView
 cleanup KHTMLView {..} = do
   for_ (listeners features) cleanupListener
@@ -871,31 +880,43 @@ diffPropertyMaps = Map.mergeWithKey diff remove add
 addListenerDeferred :: Element -> Plan s -> Listener -> ST s Listener
 addListenerDeferred e plan l@(On n t o a _) = do
 #ifdef __GHCJS__
-  (target,cb,stopper) <- unsafeIOToST $ do
+  (target,mcb,cb,stopper) <- unsafeIOToST $ do
     target <- case t of
                 ElementTarget  -> return (toJSV e)
                 WindowTarget   -> fmap toJSV getWindow
                 DocumentTarget -> fmap toJSV getDocument
-    (cb,stopper) <- do
+    (mcb,cb,stopper) <- do
 
             stopper <- newIORef undefined
 
             let stpr = join $ readIORef stopper
 
-            cb <- syncCallback1 ContinueAsync $ \jsv -> do
-              when (preventDef o) (preventDefault jsv)
-              when (stopProp o) (stopPropagation jsv)
-              a (Evt jsv target stpr)
+            cb <- asyncCallback1 $ \jsv -> a (Evt jsv target stpr)
 
             writeIORef stopper $ do
               removeEventListener target n cb
               releaseCallback cb
 
-            return (cb,stpr)
+            mcb <- 
+              if preventDef o || stopProp o then do
+                cb' <- syncCallback1 ContinueAsync $ \jsv -> do
+                  when (preventDef o) (preventDefault jsv)
+                  when (stopProp o) (stopPropagation jsv)
+                modifyIORef' stopper $ \original -> do
+                  original
+                  removeEventListener target n cb'
+                  releaseCallback cb'
+                pure (Just cb')
+              else
+                pure Nothing
 
-    return (target,cb,stopper)
+            return (mcb,cb,stpr)
 
-  amendPlan plan (addEventListener target n cb (passive o))
+    return (target,mcb,cb,stopper)
+
+  amendPlan plan $ do
+    addEventListener target n cb (passive o)
+    for_ mcb (\cb -> addEventListener target n cb (passive o))
   return (On n t o a stopper)
 #else
   return l
