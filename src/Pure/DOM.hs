@@ -655,6 +655,9 @@ diffDeferred' mounted plan plan' old !mid !new =
               new' <- unsafeIOToST (build mounted Nothing new)
               amendPlan plan $ do
                 old <- readIORef (crView r0)
+                case old of
+                  PortalView {..} -> for_ (getHost portalView) removeNodeMaybe
+                  _ -> pure ()
                 replaceNode (fromJust $ getHost old) (fromJust $ getHost new')
                 void $ queueComponentUpdate r0 (Unmount Nothing (pure ()))
               return new'
