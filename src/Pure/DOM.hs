@@ -591,6 +591,7 @@ cleanup SVGView {..} = do
 cleanup ComponentView {..} = do
   for_ record (\r -> queueComponentUpdate r (Unmount Nothing (return ())))
 cleanup PortalView {..} = do
+  for_ (getHost portalView) removeNodeMaybe
   cleanup' portalView
 cleanup KHTMLView {..} = do
   for_ (listeners features) cleanupListener
@@ -655,9 +656,6 @@ diffDeferred' mounted plan plan' old !mid !new =
               new' <- unsafeIOToST (build mounted Nothing new)
               amendPlan plan $ do
                 old <- readIORef (crView r0)
-                case old of
-                  PortalView {..} -> for_ (getHost portalView) removeNodeMaybe
-                  _ -> pure ()
                 replaceNode (fromJust $ getHost old) (fromJust $ getHost new')
                 void $ queueComponentUpdate r0 (Unmount Nothing (pure ()))
               return new'
