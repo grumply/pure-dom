@@ -360,23 +360,37 @@ addListener e f@(On n t o a _) = do
 
       let stpr = join $ readIORef stopper
 
-      cb <- asyncCallback1 $ \jsv -> a (Evt jsv target stpr)
+      if synchronous o then do
 
-      writeIORef stopper $ do
-        removeEventListener target n cb
-        releaseCallback cb
-
-      addEventListener target n cb (passive o)
-
-      when (preventDef o || stopProp o) $ do
-        cb' <- syncCallback1 ContinueAsync $ \jsv -> do
+        cb <- syncCallback1 ContinueAsync $ \jsv -> do
           when (preventDef o) (preventDefault jsv)
           when (stopProp o) (stopPropagation jsv)
-        addEventListener target n cb' True
-        modifyIORef' stopper $ \original -> do
-          original
-          removeEventListener target n cb'
-          releaseCallback cb'
+          a (Evt jsv target stpr)
+        
+        writeIORef stopper $ do
+          removeEventListener target n cb
+          releaseCallback cb
+
+        addEventListener target n cb (passive o)
+
+      else do
+        cb <- asyncCallback1 $ \jsv -> a (Evt jsv target stpr)
+
+        writeIORef stopper $ do
+          removeEventListener target n cb
+          releaseCallback cb
+
+        addEventListener target n cb (passive o)
+
+        when (preventDef o || stopProp o) $ do
+          cb' <- syncCallback1 ContinueAsync $ \jsv -> do
+            when (preventDef o) (preventDefault jsv)
+            when (stopProp o) (stopPropagation jsv)
+          addEventListener target n cb' True
+          modifyIORef' stopper $ \original -> do
+            original
+            removeEventListener target n cb'
+            releaseCallback cb'
 
       return stpr
 
@@ -891,26 +905,42 @@ addListenerDeferred e plan l@(On n t o a _) = do
 
             let stpr = join $ readIORef stopper
 
-            cb <- asyncCallback1 $ \jsv -> a (Evt jsv target stpr)
+            if synchronous o then do
 
-            writeIORef stopper $ do
-              removeEventListener target n cb
-              releaseCallback cb
+              cb <- syncCallback1 ContinueAsync $ \jsv -> do
+                when (preventDef o) (preventDefault jsv)
+                when (stopProp o) (stopPropagation jsv)
+                a (Evt jsv target stpr)
+              
+              writeIORef stopper $ do
+                removeEventListener target n cb
+                releaseCallback cb
+              
+              addEventListener target n cb (passive o)
 
-            mcb <- 
-              if preventDef o || stopProp o then do
-                cb' <- syncCallback1 ContinueAsync $ \jsv -> do
-                  when (preventDef o) (preventDefault jsv)
-                  when (stopProp o) (stopPropagation jsv)
-                modifyIORef' stopper $ \original -> do
-                  original
-                  removeEventListener target n cb'
-                  releaseCallback cb'
-                pure (Just cb')
-              else
-                pure Nothing
+              return (Nothing,cb,stpr)
 
-            return (mcb,cb,stpr)
+            else do
+              cb <- asyncCallback1 $ \jsv -> a (Evt jsv target stpr)
+
+              writeIORef stopper $ do
+                removeEventListener target n cb
+                releaseCallback cb
+
+              mcb <- 
+                if preventDef o || stopProp o then do
+                  cb' <- syncCallback1 ContinueAsync $ \jsv -> do
+                    when (preventDef o) (preventDefault jsv)
+                    when (stopProp o) (stopPropagation jsv)
+                  modifyIORef' stopper $ \original -> do
+                    original
+                    removeEventListener target n cb'
+                    releaseCallback cb'
+                  pure (Just cb')
+                else
+                  pure Nothing
+
+              return (mcb,cb,stpr)
 
     return (target,mcb,cb,stopper)
 
