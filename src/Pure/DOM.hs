@@ -494,7 +494,6 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
 
               sequence_ after
 
-              yield
               loop False new_old new newProps newState
 
 
