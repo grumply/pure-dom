@@ -360,7 +360,7 @@ addListener e f@(On n t o a _) = do
 
       let stpr = join $ readIORef stopper
 
-      if synchronous o then do
+      if not (asynchronous o) then do
 
         cb <- syncCallback1 ContinueAsync $ \jsv -> do
           when (preventDef o) (preventDefault jsv)
@@ -904,7 +904,7 @@ addListenerDeferred e plan l@(On n t o a _) = do
 
             let stpr = join $ readIORef stopper
 
-            if synchronous o then do
+            if not (asynchronous o) then do
 
               cb <- syncCallback1 ContinueAsync $ \jsv -> do
                 when (preventDef o) (preventDefault jsv)
