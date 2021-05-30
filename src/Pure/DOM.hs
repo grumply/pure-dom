@@ -413,13 +413,13 @@ newComponentThread :: forall props state. Ref props state -> Comp props state ->
 newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state -> 
   executing state >>= \st -> loop (not $ isTrue# (reallyUnsafePtrEquality# state st)) live view props st
   where
-    {-# NOINLINE loop #-}
-    loop :: Bool -> View -> View -> props -> state -> IO ()
-    loop = loop'
-
-    {-# INLINE loop' #-}
+    {-# NOINLINE loop' #-}
     loop' :: Bool -> View -> View -> props -> state -> IO ()
-    loop' !first !old !mid !props !state = do
+    loop' = loop
+
+    {-# INLINE loop #-}
+    loop :: Bool -> View -> View -> props -> state -> IO ()
+    loop !first !old !mid props state = do
       mps <- if first then pure (Just []) else awaitComponentPatches crPatchQueue
       forM_ mps (go props state [])
       where
@@ -494,7 +494,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
 
               sequence_ after
 
-              loop False new_old new newProps newState
+              loop' False new_old new newProps newState
 
 
             go1 acc (cp:cps) =
