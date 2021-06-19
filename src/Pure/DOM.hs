@@ -365,7 +365,7 @@ addListener e f@(On n t o a _) = do
         cb <- syncCallback1 ContinueAsync $ \jsv -> do
           when (preventDef o) (preventDefault jsv)
           when (stopProp o) (stopPropagation jsv)
-          a (Evt jsv target stpr)
+          a (Evt jsv (toJSV e) stpr)
         
         writeIORef stopper $ do
           removeEventListener target n cb
@@ -374,7 +374,7 @@ addListener e f@(On n t o a _) = do
         addEventListener target n cb (passive o)
 
       else do
-        cb <- asyncCallback1 $ \jsv -> a (Evt jsv target stpr)
+        cb <- asyncCallback1 $ \jsv -> a (Evt jsv (toJSV e) stpr)
 
         writeIORef stopper $ do
           removeEventListener target n cb
@@ -443,7 +443,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                 sameProps = isTrue# (reallyUnsafePtrEquality# props newProps)
                 sameState = isTrue# (reallyUnsafePtrEquality# state newState)
 
-                new
+                !new
                   | first = render props state
                   | sameProps && sameState = mid
                   | sameProps = render props newState
@@ -909,7 +909,7 @@ addListenerDeferred e plan l@(On n t o a _) = do
               cb <- syncCallback1 ContinueAsync $ \jsv -> do
                 when (preventDef o) (preventDefault jsv)
                 when (stopProp o) (stopPropagation jsv)
-                a (Evt jsv target stpr)
+                a (Evt jsv (toJSV e) stpr)
               
               writeIORef stopper $ do
                 removeEventListener target n cb
@@ -920,7 +920,7 @@ addListenerDeferred e plan l@(On n t o a _) = do
               return (Nothing,cb,stpr)
 
             else do
-              cb <- asyncCallback1 $ \jsv -> a (Evt jsv target stpr)
+              cb <- asyncCallback1 $ \jsv -> a (Evt jsv (toJSV e) stpr)
 
               writeIORef stopper $ do
                 removeEventListener target n cb
