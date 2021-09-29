@@ -235,7 +235,7 @@ build' mtd = start
           live <- go new
           writeIORef live_ live
           modifyIORef' mtd (mounted c:)
-          addIdleWork $ void $ forkIO $ newComponentThread cr c live new props state2
+          forkIO $ newComponentThread cr c live new props state2
           -- GHC doesn't allow for record update of a ComponentView here
           return (ComponentView witness (Just cr) comp props)
         go' (LazyView f a) = go (f a)
