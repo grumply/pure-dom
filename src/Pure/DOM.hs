@@ -210,7 +210,7 @@ build' mtd = start
           e <- create tag
           let n = Just (toNode e)
           fs <- setFeatures mtd e features
-          cs <- traverse (start n) children
+          !cs <- traverse (start n) children
           for_ mparent (`append` e)
           return o 
             { elementHost = Just e
@@ -261,7 +261,7 @@ build' mtd = start
           e <- create tag
           let n = Just (toNode e)
           fs <- setFeatures mtd e features
-          cs <- traverse (traverse (start n)) keyedChildren
+          !cs <- traverse (traverse (start n)) keyedChildren
           for_ mparent (`append` e)
           return o
             { elementHost = Just e
@@ -273,7 +273,7 @@ build' mtd = start
           let n = Just (toNode e)
           setXLinks e xlinks
           fs <- setFeatures mtd e features
-          cs <- traverse (start n) children
+          !cs <- traverse (start n) children
           for_ mparent (`append` e)
           return o 
             { elementHost = Just e
@@ -285,7 +285,7 @@ build' mtd = start
           let n = Just (toNode e)
           setXLinks e xlinks
           fs <- setFeatures mtd e features
-          cs <- traverse (traverse (start n)) keyedChildren
+          !cs <- traverse (traverse (start n)) keyedChildren
           for_ mparent (`append` e)
           return o
             { elementHost = Just e
@@ -433,25 +433,24 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
 
                 sameView = isTrue# (reallyUnsafePtrEquality# mid new)
 
-                (plan,plan',new_old)
+                (!plan,!plan',!new_old)
                   | first || not sameView = buildPlan $ \p p' -> diffDeferred mtd p p' old mid new
                   | otherwise = ([],[],old)
 
                 hasAnimations = not (List.null plan)
                 hasIdleWork   = not (List.null plan')
 
-              mounts <- plan `seq` plan' `seq` readIORef mtd
+              mounts <- readIORef mtd
 
               if hasAnimations && hasIdleWork then do
                 let !a = runPlan plan
                     !i = runPlan plan'
                 sync $ \barrier ->
-                  addAnimationsReverse
-                    [ putMVar barrier ()
-                    , void (addIdleWork i)
-                    , writeIORef crView new_old
-                    , a
-                    ]
+                  addAnimation $ do
+                    a
+                    writeIORef crView new_old
+                    addIdleWork i
+                    putMVar barrier ()
 
               else do
 
@@ -459,11 +458,10 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                   let !a = runPlan plan
 
                   sync $ \barrier ->
-                    addAnimationsReverse
-                      [ putMVar barrier ()
-                      , writeIORef crView new_old
-                      , a
-                      ]
+                    addAnimation $ do
+                      a
+                      writeIORef crView new_old
+                      putMVar barrier ()
 
                 when hasIdleWork $ void $ do
                   let !i = runPlan plan'
@@ -487,7 +485,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                   writeIORef crPatchQueue Nothing
 
                   let
-                    (plan,plan',res) =
+                    (!plan,!plan',!res) =
 
                       buildPlan $ \plan plan' ->
                         maybe
@@ -503,11 +501,10 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                       let !a = runPlan plan
                           !i = runPlan plan'
                       sync $ \barrier ->
-                        addAnimationsReverse
-                          [ putMVar barrier ()
-                          , void (addIdleWork i) 
-                          , a
-                          ]
+                        addAnimation $ do
+                          a
+                          addIdleWork i
+                          putMVar barrier ()
 
                     else do
 
@@ -515,10 +512,9 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                         let !a = runPlan plan
 
                         sync $ \barrier ->
-                          addAnimationsReverse
-                            [ putMVar barrier ()
-                            , a
-                            ]
+                          addAnimation $ do
+                            a
+                            putMVar barrier ()
 
                       when hasIdleWork $ void $ do
                         let !i = runPlan plan'
@@ -618,7 +614,7 @@ diffDeferred' mounted plan plan' old !mid !new =
     _  -> 
       let
           replace = do
-            new' <- unsafeIOToST (build mounted Nothing new)
+            !new' <- unsafeIOToST (build mounted Nothing new)
             replaceDeferred plan plan' old new'
 
           sameTag = 
@@ -656,7 +652,7 @@ diffDeferred' mounted plan plan' old !mid !new =
 
           (ComponentView _ _ _ _,_)
             | ComponentView _ (Just r0) _ _ <- old -> do
-              new' <- unsafeIOToST (build mounted Nothing new)
+              !new' <- unsafeIOToST (build mounted Nothing new)
               amendPlan plan $ do
                 old <- readIORef (crView r0)
                 replaceNode (fromJust $ getHost old) (fromJust $ getHost new')
@@ -676,7 +672,7 @@ diffDeferred' mounted plan plan' old !mid !new =
           (RawView{},RawView{}) 
             | cmpTag
             , isTrue# (reallyUnsafePtrEquality# (content mid) (content new)) -> do
-              fs <- diffFeaturesDeferred' (coerce $ fromJust $ getHost old) plan (features old) (features mid) (features new)
+              !fs <- diffFeaturesDeferred' (coerce $ fromJust $ getHost old) plan (features old) (features mid) (features new)
               return old { features = fs }
             | otherwise -> replace
 
@@ -698,10 +694,10 @@ diffDeferred' mounted plan plan' old !mid !new =
 
           (PortalView{},PortalView{})
             | same (toJSV (portalDestination old)) (toJSV (portalDestination new)) -> do
-              v <- diffDeferred mounted plan plan' (portalView old) (portalView mid) (portalView new)
+              !v <- diffDeferred mounted plan plan' (portalView old) (portalView mid) (portalView new)
               return old { portalView = v }
             | otherwise -> do
-              built@(getHost -> Just h) <- unsafeIOToST (build mounted Nothing (portalView new))
+              !built@(getHost -> Just h) <- unsafeIOToST (build mounted Nothing (portalView new))
               amendPlan plan' (cleanup old)
               amendPlan plan $ do
                 for_ (getHost (portalView old)) removeNode
@@ -710,9 +706,9 @@ diffDeferred' mounted plan plan' old !mid !new =
               return (PortalView (portalProxy old) (portalDestination new) built)
 
           (_,PortalView{}) -> do
-            proxy <- unsafeIOToST (build mounted Nothing (NullView Nothing))
+            !proxy <- unsafeIOToST (build mounted Nothing (NullView Nothing))
             replaceDeferred plan plan' old proxy
-            built@(getHost -> Just h) <- unsafeIOToST (build mounted Nothing (portalView new))
+            !built@(getHost -> Just h) <- unsafeIOToST (build mounted Nothing (portalView new))
             amendPlan plan $ append (toNode $ portalDestination new) h
             return (PortalView (fmap coerce $ getHost proxy) (portalDestination new) built)
 
@@ -725,8 +721,8 @@ diffDeferred' mounted plan plan' old !mid !new =
 
 diffElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
 diffElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
-  fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
-  cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
+  !fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
+  !cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
   return old
     { features = fs
     , children = cs
@@ -735,8 +731,8 @@ diffElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
 diffSVGElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
 diffSVGElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
   diffXLinksDeferred e plan (xlinks mid) (xlinks new)
-  fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
-  cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
+  !fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
+  !cs <- diffChildrenDeferred e mounted plan plan' (children old) (children mid) (children new)
   return old
     { features = fs
     , children = cs
@@ -756,7 +752,7 @@ diffFeaturesDeferred' e plan old mid new = do
   diffStylesDeferred     e plan (styles mid) (styles new)
   diffAttributesDeferred e plan (attributes mid) (attributes new)
   diffPropertiesDeferred e plan (properties mid) (properties new)
-  ls <- diffListenersDeferred e plan (listeners old) (listeners mid) (listeners new)
+  !ls <- diffListenersDeferred e plan (listeners old) (listeners mid) (listeners new)
   diffLifecyclesDeferred e plan (lifecycles old) (lifecycles mid) (lifecycles new)
   return old { listeners = ls }
 
@@ -991,16 +987,16 @@ diffChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
 
     -- 0 1+
     ([],_ ) -> do
-      frag <- unsafeIOToST createFrag
+      !frag <- unsafeIOToST createFrag
       let n = Just (toNode frag)
-      news' <- unsafeIOToST (traverse (build mounted n) news)
+      !news' <- unsafeIOToST (traverse (build mounted n) news)
       amendPlan plan (append e frag)
       return news'
 
     -- 1+ 0
     (_,[]) -> do
       amendPlan plan (clearNode e)
-      amendPlan plan' (for_ olds cleanup)
+      amendPlan plan' $! for_ olds cleanup
       return []
 
     -- 1+ 1+
@@ -1016,8 +1012,8 @@ diffChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
         _  -> diff os ms ns
       where
         diff (old:olds) (mid:mids) (new:news) = do
-          new'  <- diffDeferred mounted plan plan' old mid new
-          news' <- go olds mids news
+          !new'  <- diffDeferred mounted plan plan' old mid new
+          !news' <- go olds mids news
           return (new' : news')
 
         diff olds _ [] = do
@@ -1025,16 +1021,16 @@ diffChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
           return []
 
         diff [] _ news = do
-          frag <- unsafeIOToST createFrag
+          !frag <- unsafeIOToST createFrag
           let n = Just (toNode frag)
-          news' <- unsafeIOToST (for news (build mounted n))
+          !news' <- unsafeIOToST (for news (build mounted n))
           amendPlan plan (append e frag)
           return news'
 
 removeManyDeferred :: Plan s -> Plan s -> [View] -> ST s ()
 removeManyDeferred plan plan' vs = do
-  amendPlan plan (for_ vs (traverse_ removeNodeMaybe . getHost))
-  amendPlan plan' (for_ vs cleanup)
+  amendPlan plan $! for_ vs (traverse_ removeNodeMaybe . getHost)
+  amendPlan plan' $! for_ vs cleanup
 
 removeDeferred :: Plan s -> Plan s -> View -> ST s ()
 removeDeferred plan plan' v = do
@@ -1060,8 +1056,8 @@ replaceTextContentDeferred plan old@(textHost -> Just oh) new = do
 
 diffSVGKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
 diffSVGKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
-  fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
-  cs <- diffKeyedChildrenDeferred e mounted plan plan' (keyedChildren old) (keyedChildren mid) (keyedChildren new)
+  !fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
+  !cs <- diffKeyedChildrenDeferred e mounted plan plan' (keyedChildren old) (keyedChildren mid) (keyedChildren new)
   diffXLinksDeferred e plan (xlinks mid) (xlinks new)
   return $ old
     { features = fs
@@ -1070,8 +1066,8 @@ diffSVGKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) mid n
 
 diffKeyedElementDeferred :: IORef [IO ()] -> Plan s -> Plan s -> DiffST s View
 diffKeyedElementDeferred mounted plan plan' old@(elementHost -> Just e) mid new = do
-  fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
-  cs <- diffKeyedChildrenDeferred e mounted plan plan' (keyedChildren old) (keyedChildren mid) (keyedChildren new)
+  !fs <- diffFeaturesDeferred e plan (features old) (features mid) (features new)
+  !cs <- diffKeyedChildrenDeferred e mounted plan plan' (keyedChildren old) (keyedChildren mid) (keyedChildren new)
   return $ old
     { features = fs
     , keyedChildren = cs
@@ -1102,16 +1098,16 @@ diffKeyedChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
 
     -- 0 1+
     ([],_ ) -> do
-      frag <- unsafeIOToST createFrag
+      !frag <- unsafeIOToST createFrag
       let n = Just (toNode frag)
-      news' <- unsafeIOToST (traverse (traverse (build mounted n)) news)
+      !news' <- unsafeIOToST (traverse (traverse (build mounted n)) news)
       amendPlan plan (append e frag)
       return news'
 
     -- 1+ 0
     (_,[]) -> do
       amendPlan plan (clearNode e)
-      amendPlan plan' (for_ (fmap snd olds) cleanup)
+      amendPlan plan' $! for_ (fmap snd olds) cleanup
       return []
 
     -- 1+ 1+
@@ -1134,7 +1130,7 @@ diffKeyedChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
 
         {-# INLINE go' #-}
         go' :: Removals s -> Int -> DiffST s [(Int,View)]
-        go' _ _ olds mids news
+        go' _ !_ olds mids news
           | isTrue# (reallyUnsafePtrEquality# mids news) = pure olds
 
         -- Invariant: we can always infer the shape of `mids` from the shape of `olds`;
@@ -1205,20 +1201,21 @@ diffKeyedChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
 
         -- 0 0+
         go' dc _ [] _ news = do
-          frag <- unsafeIOToST createFrag
+          !frag <- unsafeIOToST createFrag
           let n = Just (toNode frag)
-          news' <- unsafeIOToST (traverse (traverse (build mounted n)) news)
+          !news' <- unsafeIOToST (traverse (traverse (build mounted n)) news)
           amendPlan plan (append e frag)
           return news'
 
         dKCD_helper :: DiffST s (Int,View)
         dKCD_helper (_,old) (_,mid) (nk,new) = do
-          new' <- diffDeferred mounted plan plan' old mid new
+          !new' <- diffDeferred mounted plan plan' old mid new
           return (nk,new')
 
         dKCD_ins :: Int -> Int -> View -> ST s (Int,View)
         dKCD_ins i nk new = do
           let ins (Just a) = amendPlan plan (insertAt (coerce e) a i)
-          n' <- unsafeIOToST (build mounted Nothing new)
+          !n' <- unsafeIOToST (build mounted Nothing new)
           ins (getHost n')
           return (nk,n')
+
