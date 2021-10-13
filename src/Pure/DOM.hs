@@ -440,7 +440,7 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                 hasAnimations = not (List.null plan)
                 hasIdleWork   = not (List.null plan')
 
-              mounts <- readIORef mtd
+              mounts <- plan `seq` plan' `seq` readIORef mtd
 
               if hasAnimations && hasIdleWork then do
                 let !a = runPlan plan
