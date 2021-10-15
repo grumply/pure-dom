@@ -234,8 +234,9 @@ build' mtd = start
           let new = render c props state2
           live <- go new
           writeIORef live_ live
-          modifyIORef' mtd (mounted c:)
-          forkIO $ newComponentThread cr c live new props state2
+          mv <- newEmptyMVar
+          modifyIORef' mtd (\xs -> putMVar mv ():mounted c:xs)
+          forkIO $ newComponentThread mv cr c live new props state2
           -- GHC doesn't allow for record update of a ComponentView here
           return (ComponentView witness (Just cr) comp props)
         go' (LazyView f a) = go (f a)
@@ -390,9 +391,9 @@ awaitComponentPatches pq = do
   for mpq collect `catch` \(_ :: SomeException) -> return Nothing
 
 {-# NOINLINE newComponentThread #-}
-newComponentThread :: forall props state. Ref props state -> Comp props state -> View -> View -> props -> state -> IO ()
-newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state -> 
-  executing state >>= \st -> loop (not $ isTrue# (reallyUnsafePtrEquality# state st)) live view props st
+newComponentThread :: forall props state. MVar () -> Ref props state -> Comp props state -> View -> View -> props -> state -> IO ()
+newComponentThread barrier ref@Ref {..} comp@Comp {..} = \live view props state -> 
+  executing state >>= \st -> takeMVar barrier >> loop (not $ isTrue# (reallyUnsafePtrEquality# state st)) live view props st
   where
     {-# NOINLINE loop' #-}
     loop' :: Bool -> View -> View -> props -> state -> IO ()
@@ -442,30 +443,25 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
 
               mounts <- plan `seq` plan' `seq` readIORef mtd
 
-              if hasAnimations && hasIdleWork then do
-                let !a = runPlan plan
-                    !i = runPlan plan'
+              if hasAnimations && hasIdleWork then
                 sync $ \barrier ->
                   addAnimation $ do
-                    a
+                    runPlan plan
                     writeIORef crView new_old
-                    addIdleWork i
+                    addIdleWork (runPlan plan')
                     putMVar barrier ()
 
               else do
 
-                when hasAnimations $ do
-                  let !a = runPlan plan
-
+                when hasAnimations $
                   sync $ \barrier ->
                     addAnimation $ do
-                      a
+                      runPlan plan
                       writeIORef crView new_old
                       putMVar barrier ()
 
-                when hasIdleWork $ void $ do
-                  let !i = runPlan plan'
-                  addIdleWork i
+                when hasIdleWork $ void $
+                  addIdleWork (runPlan plan')
 
               runPlan mounts
 
@@ -496,29 +492,23 @@ newComponentThread ref@Ref {..} comp@Comp {..} = \live view props state ->
                     hasAnimations = not (List.null plan)
                     hasIdleWork = not (List.null plan')
 
-                  if hasAnimations && hasIdleWork
-                    then do
-                      let !a = runPlan plan
-                          !i = runPlan plan'
+                  if hasAnimations && hasIdleWork then
+                    sync $ \barrier ->
+                      addAnimation $ do
+                        runPlan plan
+                        addIdleWork (runPlan plan')
+                        putMVar barrier ()
+
+                  else do
+
+                    when hasAnimations $
                       sync $ \barrier ->
                         addAnimation $ do
-                          a
-                          addIdleWork i
+                          runPlan plan
                           putMVar barrier ()
 
-                    else do
-
-                      when hasAnimations $ do
-                        let !a = runPlan plan
-
-                        sync $ \barrier ->
-                          addAnimation $ do
-                            a
-                            putMVar barrier ()
-
-                      when hasIdleWork $ void $ do
-                        let !i = runPlan plan'
-                        addIdleWork i
+                    when hasIdleWork $ void $
+                      addIdleWork (runPlan plan')
 
                   writeIORef crProps (error "ask: Component invalidated.")
                   writeIORef crState (error "get: Component invalidated.")
@@ -1218,4 +1208,3 @@ diffKeyedChildrenDeferred' (toNode -> e) mounted plan plan' olds mids news =
           !n' <- unsafeIOToST (build mounted Nothing new)
           ins (getHost n')
           return (nk,n')
-
