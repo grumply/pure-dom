@@ -668,7 +668,8 @@ diffDeferred' mounted plan plan' old !mid !new =
 
           (SomeView m,SomeView n)
             | isTrue# (unsafeCoerce# reallyUnsafePtrEquality# m n) -> return old
-            | otherwise -> diffDeferred mounted plan plan' old (view m) (view n)
+            | isTrue# (unsafeCoerce# reallyUnsafePtrEquality# (__pure_witness (asProxyOf m)) (__pure_witness (asProxyOf n))) -> diffDeferred mounted plan plan' old (view m) (view n)
+            | otherwise -> replace
 
           (SVGView{},SVGView{})
             | cmpTag -> diffSVGElementDeferred mounted plan plan' old mid new
