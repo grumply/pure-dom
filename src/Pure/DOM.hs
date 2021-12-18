@@ -108,6 +108,8 @@ import Pure.Data.Queue (Queue,newQueue,arrive,collect)
 import Pure.Data.Txt (Txt)
 import qualified Pure.Data.Txt as Txt (intercalate)
 
+import Pure.Data.JSON (traceJSON)
+
 {-
 Be careful in this module or GHC might eat your lunch.
 -}
@@ -668,7 +670,7 @@ diffDeferred' mounted plan plan' old !mid !new =
 
           (SomeView m,SomeView n)
             | isTrue# (unsafeCoerce# reallyUnsafePtrEquality# m n) -> return old
-            | isTrue# (unsafeCoerce# reallyUnsafePtrEquality# (__pure_witness (asProxyOf m)) (__pure_witness (asProxyOf n))) -> diffDeferred mounted plan plan' old (view m) (view n)
+            | sameTypeWitness (__pure_witness (asProxyOf m)) (__pure_witness (asProxyOf n)) -> diffDeferred mounted plan plan' old (view m) (view n)
             | otherwise -> replace
 
           (SVGView{},SVGView{})
