@@ -669,8 +669,11 @@ diffDeferred' mounted plan plan' old !mid !new =
             | otherwise -> replace
 
           (SomeView m,SomeView n)
-            | isTrue# (unsafeCoerce# reallyUnsafePtrEquality# m n) -> return old
-            | sameTypeWitness (__pure_witness (asProxyOf m)) (__pure_witness (asProxyOf n)) -> diffDeferred mounted plan plan' old (view m) (view n)
+            | sameTypeWitness (__pure_witness (asProxyOf m)) (__pure_witness (asProxyOf n)) ->
+              if isTrue# (unsafeCoerce# reallyUnsafePtrEquality# m n) then 
+                return old
+              else
+                diffDeferred mounted plan plan' old (view m) (view n)
             | otherwise -> replace
 
           (SVGView{},SVGView{})
