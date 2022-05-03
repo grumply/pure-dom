@@ -108,8 +108,6 @@ import Pure.Data.Queue (Queue,newQueue,arrive,collect)
 import Pure.Data.Txt (Txt)
 import qualified Pure.Data.Txt as Txt (intercalate)
 
-import Pure.Data.JSON (traceJSON)
-
 {-
 Be careful in this module or GHC might eat your lunch.
 -}
@@ -352,31 +350,36 @@ setProperties' :: Element -> Map Txt Txt -> IO ()
 setProperties' e = traverse_ (uncurry (setProperty e)) . Map.toList
 
 addListener :: Element -> Listener -> IO Listener
-addListener e f@(On n t o a _) = do
+addListener e f@(On n t o a _ _) = do
 #ifdef __GHCJS__
     target <- case t of
                 ElementTarget  -> return (toJSV e)
                 WindowTarget   -> fmap toJSV getWindow
                 DocumentTarget -> fmap toJSV getDocument
-    (cb,stopper) <- do
+    (cb,update,stopper) <- do
+
+      a_ <- newIORef a
 
       stopper <- newIORef undefined
 
-      let stpr = join $ readIORef stopper
+      let 
+        stpr = join $ readIORef stopper
+        upd = writeIORef a_
 
       cb <- syncCallback1 ContinueAsync $ \jsv -> do
         when (preventDef o) (preventDefault jsv)
         when (stopProp o) (stopPropagation jsv)
+        a <- readIORef a_
         a (Evt jsv target stpr)
 
       writeIORef stopper $ do
         removeEventListener target n cb
         releaseCallback cb
 
-      return (cb,stpr)
+      return (cb,upd,stpr)
 
     addEventListener target n cb (passive o)
-    return f { eventStopper = stopper }
+    return f { eventUpdate = update, eventStopper = stopper }
 #else
     return f
 #endif
@@ -563,7 +566,7 @@ newComponentThread barrier ref@Ref {..} comp@Comp {..} = \live view props state 
                     go' newProps newState' acc cps
 
 cleanupListener :: Listener -> IO ()
-cleanupListener (On _ _ _ _ stp) = stp
+cleanupListener (On _ _ _ _ _ stp) = stp
 
 {-# NOINLINE cleanup' #-}
 cleanup' :: View -> IO ()
@@ -864,40 +867,45 @@ diffPropertyMaps = Map.mergeWithKey diff remove add
       add = Map.mapWithKey (\k v -> \e -> setProperty e k v)
 
 addListenerDeferred :: Element -> Plan s -> Listener -> ST s Listener
-addListenerDeferred e plan l@(On n t o a _) = do
+addListenerDeferred e plan l@(On n t o a _ _) = do
 #ifdef __GHCJS__
-  (target,cb,stopper) <- unsafeIOToST $ do
+  (target,cb,update,stopper) <- unsafeIOToST $ do
     target <- case t of
                 ElementTarget  -> return (toJSV e)
                 WindowTarget   -> fmap toJSV getWindow
                 DocumentTarget -> fmap toJSV getDocument
-    (cb,stopper) <- do
+    (cb,update,stopper) <- do
+
+            a_ <- newIORef a
 
             stopper <- newIORef undefined
 
-            let stpr = join $ readIORef stopper
+            let 
+              stpr = join $ readIORef stopper
+              upd = writeIORef a_
 
             cb <- syncCallback1 ContinueAsync $ \jsv -> do
               when (preventDef o) (preventDefault jsv)
               when (stopProp o) (stopPropagation jsv)
+              a <- readIORef a_
               a (Evt jsv target stpr)
 
             writeIORef stopper $ do
               removeEventListener target n cb
               releaseCallback cb
 
-            return (cb,stpr)
+            return (cb,upd,stpr)
 
-    return (target,cb,stopper)
+    return (target,cb,update,stopper)
 
   amendPlan plan (addEventListener target n cb (passive o))
-  return (On n t o a stopper)
+  return (On n t o a update stopper)
 #else
   return l
 #endif
 
 removeListenerDeferred :: Plan s -> Listener -> ST s ()
-removeListenerDeferred p (On _ _ _ _ stp) = amendPlan p stp
+removeListenerDeferred p (On _ _ _ _ _ stp) = amendPlan p stp
 
 {-# INLINE diffListenersDeferred #-}
 diffListenersDeferred :: Element -> Plan s -> [Listener] -> [Listener] -> [Listener] -> ST s [Listener]
@@ -907,34 +915,81 @@ diffListenersDeferred e p old !mid !new =
     _  -> diffListenersDeferred' e p old mid new
 
 diffListenersDeferred' :: Element -> Plan s -> [Listener] -> [Listener] -> [Listener] -> ST s [Listener]
-diffListenersDeferred' e p old mid new = do
-      let om = zip old mid
+diffListenersDeferred' e p olds mids news =
+  case (mids,news) of
+    ([],[]) -> return olds
 
-      -- removes
-      for_ om $ \(o,m) -> do
-        case unsafeLookup new m of
-          Nothing -> removeListenerDeferred p o
-          Just n  -> return ()
+    -- 0 1+
+    ([],_ ) -> do
+      for news (addListenerDeferred e p)
 
-      -- adds
-      for new $ \n -> do
-        case unsafeLookupPair om n of
-          Nothing -> addListenerDeferred e p n
-          Just o  -> return o
+    -- 1+ 0
+    (_,[]) -> do
+      for olds (removeListenerDeferred p)
+      pure news
 
-unsafeLookup :: [a] -> a -> Maybe a
-unsafeLookup [] _ = Nothing
-unsafeLookup (x : xs) n =
-  case reallyUnsafePtrEquality# x n of
-    1# -> Just x
-    _  -> unsafeLookup xs n
+    -- 1+ 1+
+    _ -> go olds mids news
+  where
+    {-# NOINLINE go #-}
+    go = go'
 
-unsafeLookupPair :: [(a,a)] -> a -> Maybe a
-unsafeLookupPair [] _ = Nothing
-unsafeLookupPair ((o,m) : xs) n =
-  case reallyUnsafePtrEquality# m n of
-    1# -> Just o
-    _  -> unsafeLookupPair xs n
+    {-# INLINE go' #-}
+    go' os ms ns =
+      case reallyUnsafePtrEquality# ms ns of
+        1# -> return os
+        _  -> diff os ms ns
+      where
+        diff (old:olds) (mid:mids) (new:news) = do
+          !new'  <- diffListenerDeferred e p old mid new
+          !news' <- go olds mids news
+          return (new' : news')
+
+        diff olds _ [] = do
+          for olds (removeListenerDeferred p)
+          return []
+
+        diff [] _ news = do
+          for news (addListenerDeferred e p)
+
+diffListenerDeferred :: Element -> Plan s -> Listener -> Listener -> Listener -> ST s Listener
+diffListenerDeferred e p old mid new =
+  case reallyUnsafePtrEquality# mid new of
+    1# -> return old
+    _  -> diffListenerDeferred' e p old mid new
+
+diffListenerDeferred' :: Element -> Plan s -> Listener -> Listener -> Listener -> ST s Listener
+diffListenerDeferred' e p old mid new
+  | cmpEvent, cmpTarget, cmpOptions = do
+    amendPlan p ((eventUpdate old) (eventAction new))
+    pure old
+  | otherwise = do
+    removeListenerDeferred p old
+    addListenerDeferred e p new
+  where
+    sameEvent = 
+      let 
+        !t1 = eventName mid
+        !t2 = eventName new
+       in 
+        isTrue# (reallyUnsafePtrEquality# t1 t2)
+    cmpEvent = sameEvent || eventName mid == eventName new
+
+    sameTarget =
+      let
+        !t1 = eventTarget mid
+        !t2 = eventTarget new
+      in
+        isTrue# (reallyUnsafePtrEquality# t1 t2)
+    cmpTarget = sameTarget || eventTarget mid == eventTarget new
+
+    sameOptions =
+      let
+        !o1 = eventOptions mid
+        !o2 = eventOptions new
+      in
+        isTrue# (reallyUnsafePtrEquality# o1 o2)
+    cmpOptions = sameOptions || eventOptions mid == eventOptions new
 
 addLifecycleDeferred :: Element -> Plan s -> Lifecycle -> ST s ()
 addLifecycleDeferred e p (HostRef n w) 
